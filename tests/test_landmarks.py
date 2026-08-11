@@ -53,7 +53,7 @@ class CalibrationLandmarkContractTests(unittest.TestCase):
             },
         )
 
-    def test_missing_per_landmark_confidence_uses_conservative_floor(self):
+    def test_landmark_confidence_uses_face_detector_floor(self):
         class Landmark:
             presence = None
             visibility = None
@@ -61,17 +61,27 @@ class CalibrationLandmarkContractTests(unittest.TestCase):
         score, source = landmark_confidence(Landmark(), fallback=0.50)
 
         self.assertEqual(score, 0.50)
-        self.assertEqual(source, "model_acceptance_floor")
+        self.assertEqual(source, "face_detector_acceptance_floor")
 
-    def test_presence_and_visibility_use_more_conservative_score(self):
+    def test_zero_like_optional_fields_do_not_reject_valid_face_mesh(self):
+        class Landmark:
+            presence = 0.0
+            visibility = 0.0
+
+        score, source = landmark_confidence(Landmark(), fallback=0.50)
+
+        self.assertEqual(score, 0.50)
+        self.assertEqual(source, "face_detector_acceptance_floor")
+
+    def test_optional_landmark_scores_are_not_misrepresented_as_probability(self):
         class Landmark:
             presence = 0.92
             visibility = 0.81
 
-        score, source = landmark_confidence(Landmark())
+        score, source = landmark_confidence(Landmark(), fallback=0.50)
 
-        self.assertEqual(score, 0.81)
-        self.assertEqual(source, "min_presence_visibility")
+        self.assertEqual(score, 0.50)
+        self.assertEqual(source, "face_detector_acceptance_floor")
 
     def test_returned_jpeg_keeps_raw_frame_dimensions(self):
         raw = np.zeros((3, 5, 3), dtype=np.uint8)
