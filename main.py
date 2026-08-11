@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from uuid import UUID
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from landmarks import (
     FaceLandmarkCapture,
@@ -12,6 +13,8 @@ from landmarks import (
     LandmarkCaptureUnavailable,
 )
 
+
+MANNEQUIN_CALIBRATION_PURPOSE = "mannequin_depth_calibration"
 
 landmark_capture = FaceLandmarkCapture()
 
@@ -24,7 +27,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MakeupRobot Pi API",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -32,6 +35,13 @@ app = FastAPI(
 class TestMessage(BaseModel):
     command: str
     message: str
+
+
+class PiLandmarkCaptureRequest(BaseModel):
+    request_id: UUID
+    purpose: str
+    return_image: bool = True
+    minimum_confidence: float = Field(default=0.50, ge=0.0, le=1.0)
 
 
 @app.get("/")
@@ -66,10 +76,23 @@ def test_connection(data: TestMessage):
     }
 
 
-@app.post("/face/landmarks")
-def capture_face_landmarks():
+@app.post("/calibration/face-landmarks/capture")
+def capture_calibration_face_landmarks(data: PiLandmarkCaptureRequest):
+    if data.purpose != MANNEQUIN_CALIBRATION_PURPOSE:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Unsupported capture purpose. Expected "
+                f"'{MANNEQUIN_CALIBRATION_PURPOSE}'."
+            ),
+        )
+
     try:
-        return landmark_capture.capture()
+        return landmark_capture.capture_for_calibration(
+            request_id=str(data.request_id),
+            return_image=data.return_image,
+            minimum_confidence=data.minimum_confidence,
+        )
     except FaceNotFound as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except LandmarkCaptureUnavailable as exc:
