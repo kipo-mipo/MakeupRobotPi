@@ -11,6 +11,10 @@ from uuid import uuid4
 from landmarks import CALIBRATION_LANDMARKS, FaceLandmarkCapture
 
 
+REFERENCE_WIDTH = 1280
+REFERENCE_HEIGHT = 720
+
+
 def summarize_landmark_samples(
     captures: list[dict[str, Any]],
 ) -> dict[str, dict[str, float | int]]:
@@ -54,9 +58,40 @@ def summarize_landmark_samples(
     return summary
 
 
-def print_summary(summary: dict[str, dict[str, float | int]]) -> None:
+def add_reference_scaled_statistics(
+    summary: dict[str, dict[str, float | int]],
+    *,
+    width: int,
+    height: int,
+) -> None:
+    """Add jitter scaled to the app's 1280x720 raw-coordinate reference.
+
+    A higher-resolution capture naturally reports larger pixel distances. Scaling
+    the standard deviation and spread back to 1280x720 lets two resolution runs
+    be compared on the same coordinate scale.
+    """
+
+    u_scale = REFERENCE_WIDTH / width
+    v_scale = REFERENCE_HEIGHT / height
+
+    for row in summary.values():
+        if int(row.get("samples", 0)) == 0:
+            continue
+
+        row["stddev_u_ref_px"] = float(row["stddev_u_px"]) * u_scale
+        row["stddev_v_ref_px"] = float(row["stddev_v_px"]) * v_scale
+        row["spread_u_ref_px"] = float(row["spread_u_px"]) * u_scale
+        row["spread_v_ref_px"] = float(row["spread_v_px"]) * v_scale
+
+
+def print_summary(
+    summary: dict[str, dict[str, float | int]],
+    *,
+    width: int,
+    height: int,
+) -> None:
     print()
-    print("Raw U/V repeatability summary")
+    print(f"Raw U/V repeatability summary ({width}x{height})")
     print(
         f"{'landmark':<20} {'n':>3} "
         f"{'mean U':>9} {'sd U':>8} {'spread U':>9} "
@@ -81,6 +116,33 @@ def print_summary(summary: dict[str, dict[str, float | int]]) -> None:
             f"{float(row['spread_v_px']):>9.2f}"
         )
 
+    if width != REFERENCE_WIDTH or height != REFERENCE_HEIGHT:
+        print()
+        print(
+            "Jitter scaled back to the app's 1280x720 reference "
+            "(use these columns to compare resolutions)"
+        )
+        print(
+            f"{'landmark':<20} {'sd U@1280':>11} {'spread U@1280':>14} "
+            f"{'sd V@720':>10} {'spread V@720':>13}"
+        )
+        print("-" * 74)
+
+        for landmark_id, _ in CALIBRATION_LANDMARKS:
+            row = summary[landmark_id]
+            samples = int(row.get("samples", 0))
+            if samples == 0:
+                print(f"{landmark_id:<20}  no samples")
+                continue
+
+            print(
+                f"{landmark_id:<20} "
+                f"{float(row['stddev_u_ref_px']):>11.2f} "
+                f"{float(row['spread_u_ref_px']):>14.2f} "
+                f"{float(row['stddev_v_ref_px']):>10.2f} "
+                f"{float(row['spread_v_ref_px']):>13.2f}"
+            )
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -92,6 +154,8 @@ def main() -> int:
     parser.add_argument("--captures", type=int, default=10)
     parser.add_argument("--delay", type=float, default=0.35)
     parser.add_argument("--minimum-confidence", type=float, default=0.50)
+    parser.add_argument("--width", type=int, default=REFERENCE_WIDTH)
+    parser.add_argument("--height", type=int, default=REFERENCE_HEIGHT)
     parser.add_argument(
         "--json-output",
         type=str,
@@ -106,8 +170,10 @@ def main() -> int:
         parser.error("--delay cannot be negative")
     if not 0 <= args.minimum_confidence <= 1:
         parser.error("--minimum-confidence must be between 0 and 1")
+    if args.width < 2 or args.height < 2:
+        parser.error("--width and --height must both be at least 2")
 
-    detector = FaceLandmarkCapture()
+    detector = FaceLandmarkCapture(raw_width=args.width, raw_height=args.height)
     captures: list[dict[str, Any]] = []
 
     try:
@@ -126,11 +192,20 @@ def main() -> int:
         detector.close()
 
     summary = summarize_landmark_samples(captures)
-    print_summary(summary)
+    add_reference_scaled_statistics(
+        summary,
+        width=args.width,
+        height=args.height,
+    )
+    print_summary(summary, width=args.width, height=args.height)
 
     if args.json_output:
         payload = {
             "capture_count": len(captures),
+            "raw_width_px": args.width,
+            "raw_height_px": args.height,
+            "reference_width_px": REFERENCE_WIDTH,
+            "reference_height_px": REFERENCE_HEIGHT,
             "summary": summary,
             "captures": captures,
         }
