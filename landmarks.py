@@ -5,8 +5,10 @@ import importlib.metadata
 import io
 import math
 import os
+import shutil
+import subprocess
+import tempfile
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -52,17 +54,7 @@ def upright_normalized_to_raw_pixel(
     raw_width: int = RAW_IMAGE_WIDTH,
     raw_height: int = RAW_IMAGE_HEIGHT,
 ) -> tuple[float, float]:
-    """Map an upright detector point back into the raw sideways Pi image.
-
-    The iOS app rotates the raw frame 90 degrees counterclockwise for display:
-
-        upright_x = raw_v
-        upright_y = raw_width - 1 - raw_u
-
-    MediaPipe returns normalized points in that upright image. This applies the
-    inverse transform so the API returns raw U/V pixels matching the app's
-    flat-board calibration coordinate system.
-    """
+    """Map an upright detector point back into the raw sideways Pi image."""
 
     if raw_width <= 1 or raw_height <= 1:
         raise ValueError("raw image dimensions must both be greater than one")
@@ -76,7 +68,6 @@ def upright_normalized_to_raw_pixel(
     raw_u = (raw_width - 1) - upright_y
     raw_v = upright_x
 
-    # A detector can report values a tiny amount outside [0, 1].
     raw_u = min(max(raw_u, 0.0), raw_width - 1.0)
     raw_v = min(max(raw_v, 0.0), raw_height - 1.0)
 
@@ -123,13 +114,7 @@ def landmark_confidence(
     *,
     fallback: float = MODEL_MINIMUM_CONFIDENCE,
 ) -> tuple[float, str]:
-    """Return a conservative confidence and describe where it came from.
-
-    MediaPipe's NormalizedLandmark supports presence/visibility, but a model is
-    allowed to leave either unset. We use the most conservative supplied score.
-    If neither exists, return the configured face-landmarker acceptance floor
-    rather than inventing a high per-landmark probability.
-    """
+    """Return a conservative confidence and describe where it came from."""
 
     candidates: list[tuple[str, float]] = []
 
@@ -151,7 +136,7 @@ def landmark_confidence(
 
 
 class FaceLandmarkCapture:
-    """Serialized access to the Pi camera and MediaPipe Face Landmarker."""
+    """Serialized rpicam capture plus MediaPipe Face Landmarker detection."""
 
     def __init__(
         self,
@@ -166,12 +151,11 @@ class FaceLandmarkCapture:
             model_path
             or os.getenv("FACE_LANDMARKER_MODEL_PATH", str(DEFAULT_MODEL_PATH))
         )
-
         self._lock = threading.Lock()
-        self._camera: Any | None = None
         self._landmarker: Any | None = None
 
     def status(self) -> dict[str, Any]:
+        camera_command = shutil.which("rpicam-jpeg")
         return {
             "raw_image_width_px": self.raw_width,
             "raw_image_height_px": self.raw_height,
@@ -179,7 +163,8 @@ class FaceLandmarkCapture:
             "rotation_degrees_ccw_for_detection": DETECTOR_ROTATION_DEGREES_CCW,
             "model_path": str(self.model_path),
             "model_exists": self.model_path.is_file(),
-            "camera_initialized": self._camera is not None,
+            "camera_backend": "rpicam-jpeg",
+            "camera_command_found": camera_command is not None,
             "landmarker_initialized": self._landmarker is not None,
             "calibration_landmark_ids": [
                 landmark_id for landmark_id, _ in CALIBRATION_LANDMARKS
@@ -197,11 +182,10 @@ class FaceLandmarkCapture:
             self._ensure_ready()
 
             captured_at = datetime.now(timezone.utc).isoformat()
-            raw_rgb = self._camera.capture_array("main")
+            raw_rgb = self._capture_raw_rgb()
             self._validate_frame(raw_rgb)
 
-            # The camera is physically sideways. Rotate only the detector input.
-            # The response image and U/V values remain in the original raw frame.
+            # Physical camera is sideways. Rotate only detector input.
             upright_rgb = np.ascontiguousarray(np.rot90(raw_rgb, k=1))
 
             try:
@@ -255,7 +239,6 @@ class FaceLandmarkCapture:
                         "u_px": raw_u,
                         "v_px": raw_v,
                         "confidence": confidence,
-                        # Extra traceability fields are ignored safely by iOS.
                         "source_index": source_index,
                         "confidence_source": confidence_source,
                     }
@@ -267,23 +250,21 @@ class FaceLandmarkCapture:
                     f"minimum_confidence={minimum_confidence:.2f}."
                 )
 
-            image_base64 = (
-                encode_raw_rgb_as_jpeg_base64(raw_rgb)
-                if return_image
-                else None
-            )
-
             return {
                 "status": "ok",
                 "request_id": request_id,
                 "captured_at": captured_at,
                 "camera": {
-                    "model": self._camera_model_name(),
+                    "model": "Pi Camera Module 3 Standard",
                     "raw_width_px": self.raw_width,
                     "raw_height_px": self.raw_height,
                     "rotation_degrees_ccw": DETECTOR_ROTATION_DEGREES_CCW,
                 },
-                "image_jpeg_base64": image_base64,
+                "image_jpeg_base64": (
+                    encode_raw_rgb_as_jpeg_base64(raw_rgb)
+                    if return_image
+                    else None
+                ),
                 "landmarks": selected_landmarks,
                 "detector": {
                     "name": "MediaPipe Face Landmarker",
@@ -305,33 +286,74 @@ class FaceLandmarkCapture:
                 finally:
                     self._landmarker = None
 
-            if self._camera is not None:
-                try:
-                    self._camera.stop()
-                finally:
-                    self._camera.close()
-                    self._camera = None
-
-    def _validate_frame(self, raw_rgb: np.ndarray) -> None:
-        expected_shape = (self.raw_height, self.raw_width)
-        if raw_rgb.ndim != 3 or raw_rgb.shape[:2] != expected_shape:
-            raise LandmarkCaptureError(
-                "Unexpected camera frame shape "
-                f"{raw_rgb.shape}; expected "
-                f"({self.raw_height}, {self.raw_width}, 3)."
+    def _capture_raw_rgb(self) -> np.ndarray:
+        command = shutil.which("rpicam-jpeg")
+        if command is None:
+            raise LandmarkCaptureUnavailable(
+                "rpicam-jpeg is not installed or not on PATH. Run setup_pi.sh."
             )
 
-        if raw_rgb.shape[2] != 3:
+        with tempfile.TemporaryDirectory(prefix="makeuprobot-camera-") as temp_dir:
+            image_path = Path(temp_dir) / "frame.jpg"
+            args = [
+                command,
+                "--output",
+                str(image_path),
+                "--timeout",
+                "800",
+                "--width",
+                str(self.raw_width),
+                "--height",
+                str(self.raw_height),
+                "--autofocus-mode",
+                "default",
+                "--nopreview",
+            ]
+
+            try:
+                completed = subprocess.run(
+                    args,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=12,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise LandmarkCaptureUnavailable(
+                    "Pi camera capture timed out."
+                ) from exc
+
+            if completed.returncode != 0 or not image_path.is_file():
+                detail = (completed.stderr or completed.stdout or "").strip()
+                raise LandmarkCaptureUnavailable(
+                    "rpicam-jpeg could not capture a frame"
+                    + (f": {detail}" if detail else ".")
+                )
+
+            try:
+                with Image.open(image_path) as image:
+                    return np.asarray(image.convert("RGB"), dtype=np.uint8)
+            except Exception as exc:
+                raise LandmarkCaptureError(
+                    f"Captured JPEG could not be decoded: {exc}"
+                ) from exc
+
+    def _validate_frame(self, raw_rgb: np.ndarray) -> None:
+        expected_shape = (self.raw_height, self.raw_width, 3)
+        if raw_rgb.shape != expected_shape:
             raise LandmarkCaptureError(
-                f"Unexpected channel count {raw_rgb.shape[2]}; expected RGB888."
+                f"Unexpected camera frame shape {raw_rgb.shape}; "
+                f"expected {expected_shape}."
             )
 
     def _ensure_ready(self) -> None:
+        if shutil.which("rpicam-jpeg") is None:
+            raise LandmarkCaptureUnavailable(
+                "rpicam-jpeg is unavailable. Run setup_pi.sh."
+            )
+
         if self._landmarker is None:
             self._initialize_landmarker()
-
-        if self._camera is None:
-            self._initialize_camera()
 
     def _initialize_landmarker(self) -> None:
         if not self.model_path.is_file():
@@ -368,62 +390,6 @@ class FaceLandmarkCapture:
             raise LandmarkCaptureUnavailable(
                 f"Could not initialize Face Landmarker: {exc}"
             ) from exc
-
-    def _initialize_camera(self) -> None:
-        try:
-            from libcamera import controls
-            from picamera2 import Picamera2
-        except ImportError as exc:
-            raise LandmarkCaptureUnavailable(
-                "Picamera2/libcamera is not available. Install "
-                "python3-picamera2 from Raspberry Pi OS."
-            ) from exc
-
-        camera = None
-        try:
-            camera = Picamera2()
-            config = camera.create_preview_configuration(
-                main={
-                    "size": (self.raw_width, self.raw_height),
-                    "format": "RGB888",
-                }
-            )
-            camera.configure(config)
-            camera.start()
-            camera.set_controls(
-                {
-                    "AfMode": controls.AfModeEnum.Continuous,
-                }
-            )
-
-            # Give AE/AWB/autofocus a short startup window before first capture.
-            time.sleep(0.5)
-        except Exception as exc:
-            if camera is not None:
-                try:
-                    camera.close()
-                except Exception:
-                    pass
-
-            raise LandmarkCaptureUnavailable(
-                f"Could not initialize Pi camera: {exc}"
-            ) from exc
-
-        self._camera = camera
-
-    def _camera_model_name(self) -> str:
-        if self._camera is None:
-            return "Pi Camera Module 3 Standard"
-
-        try:
-            sensor_model = self._camera.camera_properties.get("Model")
-        except Exception:
-            sensor_model = None
-
-        if sensor_model:
-            return f"Pi Camera Module 3 Standard ({sensor_model})"
-
-        return "Pi Camera Module 3 Standard"
 
     @staticmethod
     def _mediapipe_version() -> str | None:
