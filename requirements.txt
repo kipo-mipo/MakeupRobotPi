@@ -1,5 +1,6 @@
 fastapi
 uvicorn
 numpy<2
+Pillow
 mediapipe==0.10.9; platform_machine == "aarch64"
 mediapipe==0.10.35; platform_machine != "aarch64"
