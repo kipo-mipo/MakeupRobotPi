@@ -1,13 +1,31 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
+from landmarks import (
+    FaceLandmarkCapture,
+    FaceNotFound,
+    LandmarkCaptureError,
+    LandmarkCaptureUnavailable,
+)
+
+
+landmark_capture = FaceLandmarkCapture()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    landmark_capture.close()
 
 
 app = FastAPI(
     title="MakeupRobot Pi API",
-    version="0.1.0",
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 
@@ -21,6 +39,7 @@ def root():
     return {
         "name": "MakeupRobot Pi API",
         "status": "running",
+        "version": app.version,
     }
 
 
@@ -30,6 +49,8 @@ def get_status():
         "status": "ok",
         "robot": "MakeupRobot",
         "server_time": datetime.now(timezone.utc).isoformat(),
+        "api_version": app.version,
+        "face_landmark_capture": landmark_capture.status(),
     }
 
 
@@ -43,6 +64,18 @@ def test_connection(data: TestMessage):
         "received_message": data.message,
         "reply": "hello iPhone",
     }
+
+
+@app.post("/face/landmarks")
+def capture_face_landmarks():
+    try:
+        return landmark_capture.capture()
+    except FaceNotFound as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LandmarkCaptureUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LandmarkCaptureError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 if __name__ == "__main__":
