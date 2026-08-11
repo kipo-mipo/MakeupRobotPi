@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import importlib.metadata
 import io
-import math
 import os
 import shutil
 import subprocess
@@ -94,45 +93,27 @@ def encode_raw_rgb_as_jpeg_base64(
     return base64.b64encode(output.getvalue()).decode("ascii")
 
 
-def _finite_probability(value: Any) -> float | None:
-    if value is None:
-        return None
-
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-
-    if not math.isfinite(number):
-        return None
-
-    return min(max(number, 0.0), 1.0)
-
-
 def landmark_confidence(
     landmark: Any,
     *,
     fallback: float = MODEL_MINIMUM_CONFIDENCE,
 ) -> tuple[float, str]:
-    """Return a conservative confidence and describe where it came from."""
+    """Return the face-detector acceptance floor for a mesh landmark.
 
-    candidates: list[tuple[str, float]] = []
+    MediaPipe Face Landmarker does not guarantee a calibrated per-landmark
+    confidence score. NormalizedLandmark presence/visibility are optional, and
+    older bindings/models can surface unsupported fields as zero-like values.
+    Treating those values as per-point probabilities caused valid mannequin
+    landmarks to be discarded after a face had already passed the detector's
+    configured confidence thresholds.
 
-    presence = _finite_probability(getattr(landmark, "presence", None))
-    if presence is not None:
-        candidates.append(("presence", presence))
+    For this calibration workflow, successful face detection is the acceptance
+    gate. The app then requires visual verification of each semantic point.
+    """
 
-    visibility = _finite_probability(getattr(landmark, "visibility", None))
-    if visibility is not None:
-        candidates.append(("visibility", visibility))
-
-    if candidates:
-        source, score = min(candidates, key=lambda item: item[1])
-        if len(candidates) == 2:
-            source = "min_presence_visibility"
-        return score, source
-
-    return min(max(float(fallback), 0.0), 1.0), "model_acceptance_floor"
+    _ = landmark
+    score = min(max(float(fallback), 0.0), 1.0)
+    return score, "face_detector_acceptance_floor"
 
 
 class FaceLandmarkCapture:
@@ -247,7 +228,9 @@ class FaceLandmarkCapture:
             if not selected_landmarks:
                 raise FaceNotFound(
                     "A face was detected, but no calibration landmarks met "
-                    f"minimum_confidence={minimum_confidence:.2f}."
+                    f"minimum_confidence={minimum_confidence:.2f}. "
+                    f"This detector exposes a calibration confidence floor of "
+                    f"{MODEL_MINIMUM_CONFIDENCE:.2f}."
                 )
 
             return {
@@ -272,8 +255,8 @@ class FaceLandmarkCapture:
                     "landmark_set": "makeuprobot_mannequin_v1",
                     "left_right_convention": "anatomical_subject",
                     "confidence_mode": (
-                        "landmark presence/visibility when supplied; otherwise "
-                        "the configured model acceptance floor"
+                        "face detector acceptance floor; semantic landmarks "
+                        "require visual verification in the calibration app"
                     ),
                 },
             }
