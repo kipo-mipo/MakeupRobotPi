@@ -2,6 +2,8 @@
 
 Raspberry Pi service for MakeupRobot camera capture and app communication.
 
+> **Current calibration handoff:** see [`docs/CALIBRATION_HANDOFF.md`](docs/CALIBRATION_HANDOFF.md) before changing the camera, landmark mapping, app/Pi contract, or calibration workflow. It records the actual-hardware validation state, repeatability results, VLC debug stream, and next iOS integration steps.
+
 ## Calibration architecture
 
 The one-time system calibration has two stages:
@@ -56,9 +58,9 @@ Example response shape:
 {
   "status": "ok",
   "request_id": "19c5b823-1296-487d-85fd-27df422d5232",
-  "captured_at": "2026-08-10T23:45:00+00:00",
+  "captured_at": "2026-08-11T01:03:46+00:00",
   "camera": {
-    "model": "Pi Camera Module 3 Standard (imx708)",
+    "model": "Pi Camera Module 3 Standard",
     "raw_width_px": 1280,
     "raw_height_px": 720,
     "rotation_degrees_ccw": 90
@@ -67,18 +69,19 @@ Example response shape:
   "landmarks": [
     {
       "id": "nose_tip",
-      "u_px": 650.2,
-      "v_px": 349.8,
+      "u_px": 313.07,
+      "v_px": 353.21,
       "confidence": 0.5,
       "source_index": 1,
-      "confidence_source": "model_acceptance_floor"
+      "confidence_source": "face_detector_acceptance_floor"
     }
   ],
   "detector": {
     "name": "MediaPipe Face Landmarker",
-    "version": "0.10.9",
+    "version": "0.10.18",
     "landmark_set": "makeuprobot_mannequin_v1",
-    "left_right_convention": "anatomical_subject"
+    "left_right_convention": "anatomical_subject",
+    "confidence_mode": "face detector acceptance floor; semantic landmarks require visual verification in the calibration app"
   }
 }
 ```
@@ -111,22 +114,20 @@ an ID means.
 
 ## Confidence behavior
 
-MediaPipe's landmark container can expose `presence` and `visibility`, but
-models are allowed to leave those values unset. The Pi therefore does not
-invent high per-point probabilities.
+The current MediaPipe Face Landmarker build does not provide a useful calibrated
+per-vertex probability for this mesh. The Pi therefore does not invent high
+per-point confidence values.
 
-For each selected landmark:
+- Face detection/presence acceptance thresholds are configured at `0.50`.
+- Once the face is accepted, the six semantic mesh points are returned with
+  `confidence = 0.50`.
+- `confidence_source = "face_detector_acceptance_floor"` makes the meaning
+  explicit.
+- Semantic correctness is verified visually in the calibration UI/debug stream.
 
-1. If presence/visibility are supplied, use the more conservative supplied
-   score.
-2. If neither is supplied, report the Face Landmarker model acceptance floor
-   (`0.50`) and label its traceability field
-   `confidence_source = "model_acceptance_floor"`.
-
-This means a displayed `50%` in the current app can mean "the model accepted
-the face at the configured threshold; this detector did not supply a separate
-per-landmark probability." It should not be interpreted as a calibrated
-statistical probability.
+A displayed `50%` therefore means "the face passed the configured detector
+acceptance floor," not a calibrated 50% probability that an individual point
+is correct.
 
 ## Other API endpoints
 
@@ -172,6 +173,28 @@ curl -X POST http://localhost:8000/calibration/face-landmarks/capture \
 
 The response will be large when `return_image` is true because it contains a
 base64 JPEG.
+
+## Pi-only diagnostics
+
+Stationary landmark repeatability:
+
+```bash
+python repeatability.py
+```
+
+Upright annotated MJPEG stream for VLC:
+
+```bash
+python landmark_stream.py
+```
+
+Then open:
+
+```text
+http://<PI-IP>:8081/landmarks.mjpg
+```
+
+These diagnostics do not change the iOS app-facing calibration contract.
 
 ## Validation order
 
