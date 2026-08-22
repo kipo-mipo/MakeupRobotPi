@@ -147,7 +147,7 @@ def _require_dependencies() -> None:
     if np is None:
         missing.append("numpy")
     if cv2 is None:
-        missing.append("opencv-python-headless")
+        missing.append("opencv-contrib-python")
     if missing:
         raise CameraUnavailableError("Missing camera dependencies: " + ", ".join(missing))
 
@@ -227,10 +227,9 @@ def capture_calibration(
         config.set_frame_aggregate_output_mode(OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE)
         align_filter = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)
 
-        try:
-            pipeline.enable_frame_sync()
-        except Exception:
-            pass
+        # Keep frame sync OFF for software D2C alignment. Orbbec's current
+        # software-alignment example does the same; some devices/platforms fail
+        # to deliver complete color+depth pairs when frame sync is forced on.
 
         try:
             pipeline.start(config)
@@ -240,6 +239,10 @@ def capture_calibration(
 
             deadline = time.monotonic() + timeout_seconds
             accepted_frames = 0
+            framesets_seen = 0
+            raw_pairs_seen = 0
+            aligned_results_seen = 0
+            aligned_pairs_seen = 0
             color_frame = None
             depth_frame = None
 
@@ -248,22 +251,33 @@ def capture_calibration(
                 if frames is None:
                     continue
 
+                framesets_seen += 1
+                raw_color = frames.get_color_frame()
+                raw_depth = frames.get_depth_frame()
+                if raw_color is not None and raw_depth is not None:
+                    raw_pairs_seen += 1
+
                 aligned = align_filter.process(frames)
                 if aligned is None:
                     continue
+
+                aligned_results_seen += 1
                 aligned = _as_frameset(aligned)
                 color_frame = aligned.get_color_frame()
                 depth_frame = aligned.get_depth_frame()
                 if color_frame is None or depth_frame is None:
                     continue
 
+                aligned_pairs_seen += 1
                 accepted_frames += 1
                 if accepted_frames > warmup_frames:
                     break
 
             if color_frame is None or depth_frame is None:
                 raise CameraCaptureError(
-                    f"Timed out after {timeout_seconds:.1f}s waiting for aligned color/depth frames."
+                    f"Timed out after {timeout_seconds:.1f}s waiting for aligned color/depth frames "
+                    f"(framesets={framesets_seen}, raw_pairs={raw_pairs_seen}, "
+                    f"align_outputs={aligned_results_seen}, aligned_pairs={aligned_pairs_seen})."
                 )
 
             color_bgr = _frame_to_bgr(color_frame)
@@ -325,6 +339,7 @@ def capture_calibration(
                     "max_valid_mm": float(valid_depth.max()) * depth_scale_mm if valid_depth.size else None,
                 },
                 "alignment": "depth_to_color_software",
+                "frame_sync": False,
                 "warmup_frames": warmup_frames,
             }
             metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
