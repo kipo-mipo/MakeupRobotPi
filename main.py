@@ -97,7 +97,10 @@ def create_depth_samples(data: DepthSampleRequest):
     try:
         return sample_capture_depth(
             data.capture_id,
-            [point.model_dump() for point in data.points],
+            [
+                {"id": point.id, "u_px": point.u_px, "v_px": point.v_px}
+                for point in data.points
+            ],
             radius_px=data.radius_px,
         )
     except CalibrationDepthError as exc:
