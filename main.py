@@ -1,11 +1,14 @@
+import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from calibration_depth import CalibrationDepthError, sample_capture_depth
 from gemini_camera import (
     CAPTURE_DIR,
     CameraCaptureError,
@@ -17,13 +20,32 @@ from gemini_camera import (
 
 app = FastAPI(
     title="MakeupRobot Pi API",
-    version="0.2.0",
+    version="0.3.0",
 )
+
+CONFIG_DIR = Path(__file__).resolve().parent / "config"
+ACTIVE_CALIBRATION_PATH = CONFIG_DIR / "gemini_robot_calibration.json"
 
 
 class TestMessage(BaseModel):
     command: str
     message: str
+
+
+class DepthSamplePoint(BaseModel):
+    id: str
+    u_px: float
+    v_px: float
+
+
+class DepthSampleRequest(BaseModel):
+    capture_id: str
+    points: list[DepthSamplePoint]
+    radius_px: int = 2
+
+
+class CalibrationProfileEnvelope(BaseModel):
+    profile: dict[str, Any]
 
 
 @app.get("/")
@@ -68,6 +90,44 @@ def create_calibration_capture():
         }
     )
     return payload
+
+
+@app.post("/calibration/depth-samples")
+def create_depth_samples(data: DepthSampleRequest):
+    try:
+        return sample_capture_depth(
+            data.capture_id,
+            [
+                {"id": point.id, "u_px": point.u_px, "v_px": point.v_px}
+                for point in data.points
+            ],
+            radius_px=data.radius_px,
+        )
+    except CalibrationDepthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/calibration/profile")
+def save_calibration_profile(data: CalibrationProfileEnvelope):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "profile": data.profile,
+    }
+    temporary_path = ACTIVE_CALIBRATION_PATH.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temporary_path.replace(ACTIVE_CALIBRATION_PATH)
+    return {
+        "status": "ok",
+        "path": ACTIVE_CALIBRATION_PATH.name,
+    }
+
+
+@app.get("/calibration/profile")
+def get_calibration_profile():
+    if not ACTIVE_CALIBRATION_PATH.is_file():
+        raise HTTPException(status_code=404, detail="No active Gemini-to-robot calibration is saved.")
+    return json.loads(ACTIVE_CALIBRATION_PATH.read_text(encoding="utf-8"))
 
 
 @app.get("/captures/{filename}")
