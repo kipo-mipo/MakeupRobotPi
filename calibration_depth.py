@@ -9,6 +9,7 @@ import numpy as np
 
 from camera_geometry import CameraGeometryError, read_active_camera_geometry
 from gemini_camera import CAPTURE_DIR
+from gemini_orientation import capture_display_rotation, display_to_raw_pixel
 
 
 class CalibrationDepthError(RuntimeError):
@@ -27,32 +28,58 @@ def _capture_paths(capture_id: str, capture_dir: Path = CAPTURE_DIR) -> tuple[Pa
     return depth_path, metadata_path
 
 
-def _validated_point(point: dict[str, Any], width: int, height: int) -> dict[str, Any]:
+def _validated_point(
+    point: dict[str, Any],
+    width: int,
+    height: int,
+    rotation_degrees: int,
+) -> dict[str, Any]:
     point_id = str(point.get("id", ""))
     try:
-        u = float(point["u_px"])
-        v = float(point["v_px"])
+        display_u = float(point["u_px"])
+        display_v = float(point["v_px"])
     except (KeyError, TypeError, ValueError) as exc:
         raise CalibrationDepthError(
             f"Depth point {point_id or '<unnamed>'} has invalid U/V coordinates."
         ) from exc
 
-    if not np.isfinite(u) or not np.isfinite(v):
+    if not np.isfinite(display_u) or not np.isfinite(display_v):
         raise CalibrationDepthError(
             f"Depth point {point_id or '<unnamed>'} has non-finite U/V coordinates."
         )
 
-    center_u = int(round(u))
-    center_v = int(round(v))
+    display_center_u = int(round(display_u))
+    display_center_v = int(round(display_v))
+    if (
+        display_center_u < 0
+        or display_center_u >= width
+        or display_center_v < 0
+        or display_center_v >= height
+    ):
+        raise CalibrationDepthError(
+            f"Depth point {point_id or '<unnamed>'} is outside the upright display image ({width}x{height})."
+        )
+
+    raw_u, raw_v = display_to_raw_pixel(
+        display_u,
+        display_v,
+        width=width,
+        height=height,
+        rotation_degrees=rotation_degrees,
+    )
+    center_u = int(round(raw_u))
+    center_v = int(round(raw_v))
     if center_u < 0 or center_u >= width or center_v < 0 or center_v >= height:
         raise CalibrationDepthError(
-            f"Depth point {point_id or '<unnamed>'} is outside the aligned image ({width}x{height})."
+            f"Depth point {point_id or '<unnamed>'} maps outside the raw aligned image ({width}x{height})."
         )
 
     return {
         "id": point_id,
-        "u_px": u,
-        "v_px": v,
+        "display_u_px": display_u,
+        "display_v_px": display_v,
+        "raw_u_px": raw_u,
+        "raw_v_px": raw_v,
         "center_u": center_u,
         "center_v": center_v,
     }
@@ -106,9 +133,6 @@ def _face_consistent_fallback(
     reference_depth_mm: float,
     initial_radius_px: int,
 ) -> tuple[float | None, int, int | None]:
-    # Depth holes near a face silhouette are common with stereo cameras. Expand
-    # only for failed points, and reject values inconsistent with the other
-    # valid facial landmarks so background pixels are not silently substituted.
     tolerance_mm = max(40.0, reference_depth_mm * 0.05)
     radii = sorted({max(initial_radius_px + 2, 4), 6, 8})
 
@@ -265,6 +289,7 @@ def sample_capture_depth(
 
     depth_path, metadata_path = _capture_paths(capture_id, capture_dir)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    rotation_degrees = capture_display_rotation(metadata)
 
     try:
         scale_mm = float(metadata["depth"]["scale_mm_per_unit"])
@@ -287,7 +312,10 @@ def sample_capture_depth(
         width=width,
         height=height,
     )
-    validated = [_validated_point(point, width, height) for point in points]
+    validated = [
+        _validated_point(point, width, height, rotation_degrees)
+        for point in points
+    ]
 
     initial_samples: list[dict[str, Any]] = []
     reliable_face_depths_mm: list[float] = []
@@ -346,8 +374,8 @@ def sample_capture_depth(
         camera_xyz = None
         if depth_mm is not None:
             camera_xyz = _deproject_color_pixel(
-                u_px=sample["u_px"],
-                v_px=sample["v_px"],
+                u_px=sample["raw_u_px"],
+                v_px=sample["raw_v_px"],
                 depth_mm=depth_mm,
                 geometry=geometry,
                 width=width,
@@ -357,8 +385,10 @@ def sample_capture_depth(
         samples.append(
             {
                 "id": sample["id"],
-                "u_px": sample["u_px"],
-                "v_px": sample["v_px"],
+                "u_px": sample["display_u_px"],
+                "v_px": sample["display_v_px"],
+                "raw_u_px": sample["raw_u_px"],
+                "raw_v_px": sample["raw_v_px"],
                 "depth_raw": raw_value,
                 "depth_mm": depth_mm,
                 "camera_x_mm": camera_xyz[0] if camera_xyz else None,
@@ -378,10 +408,13 @@ def sample_capture_depth(
         "width": width,
         "height": height,
         "depth_scale_mm": scale_mm,
+        "display_rotation_degrees": rotation_degrees,
+        "pixel_coordinate_system": "upright_display_pixels",
+        "raw_pixel_coordinate_system": "native_gemini_rgb_pixels",
         "camera_geometry": geometry,
         "camera_coordinate_convention": {
-            "x": "right_mm",
-            "y": "down_mm",
+            "x": "right_mm_in_raw_rgb_optical_frame",
+            "y": "down_mm_in_raw_rgb_optical_frame",
             "z": "forward_optical_depth_mm",
         },
         "samples": samples,
