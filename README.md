@@ -2,11 +2,20 @@
 
 Raspberry Pi API for the MakeupRobot prototype.
 
-## One-stage Gemini 215 calibration
+## One-stage Gemini 215 rigid calibration
 
-The active calibration workflow uses the Gemini RGB frame and its software-aligned depth frame directly. There is no flat-board calibration stage.
+The active calibration is a physical 3D camera-to-robot calibration. There is no flat-board stage and no free affine camera fit.
 
-The iPhone detects facial landmarks in the Gemini RGB image, sends those exact raw U/V pixels back to the Pi for aligned depth sampling, then solves one Gemini `(U, V, depth)` → Robot `(X, Y, Z)` transform from measured robot ground truth.
+For each facial landmark:
+
+1. FaceCapture detects raw Gemini RGB `U/V`.
+2. The Pi samples the matching software-aligned depth frame.
+3. The Pi reads the Gemini RGB intrinsics and distortion calibration from the active Orbbec stream profiles.
+4. The raw pixel is undistorted and deprojected into Gemini optical camera coordinates in millimeters: `Camera X/Y/Z`.
+5. FaceCapture pairs that camera-space point with measured `Robot X/Y/Z`.
+6. FaceCapture solves one rigid transform only: a 3×3 rotation plus a 3D translation.
+
+The solver is not allowed to stretch, shear, or independently scale axes. That prevents a low-residual affine fit from hiding an incorrect physical mapping.
 
 ### Install
 
@@ -27,23 +36,27 @@ python -c "import pyorbbecsdk, os; print(os.path.dirname(pyorbbecsdk.__file__))"
 
 Then run `shared/setup_env.py` from that directory with the permissions it requests. Replug the camera afterward if needed.
 
-### Check camera discovery
-
-```bash
-python scripts/check_camera.py
-```
-
-Or, once the API is running:
-
-```bash
-curl http://127.0.0.1:8000/camera/status
-```
-
 ### Run the API
 
 ```bash
 python main.py
 ```
+
+The rigid-calibration API reports version `0.4.0`.
+
+### Check camera discovery
+
+```bash
+curl http://127.0.0.1:8000/camera/status
+```
+
+### Check Gemini intrinsics
+
+```bash
+curl http://127.0.0.1:8000/camera/geometry
+```
+
+A valid response must contain nonzero RGB focal lengths `fx/fy`, principal point `cx/cy`, RGB distortion coefficients, and the physical camera serial number. The Orbbec SDK calibration is read after the active color/depth streams have produced frames.
 
 ### 1. Capture RGB + aligned depth
 
@@ -53,15 +66,15 @@ curl -X POST http://127.0.0.1:8000/calibration/capture
 
 A successful capture returns URLs for:
 
-- the RGB calibration image (`*_color.png`)
-- the aligned 16-bit raw depth image (`*_depth_raw.png`)
-- capture metadata (`*_metadata.json`) including the depth scale in millimeters per raw unit
+- the native Gemini RGB calibration image
+- the software depth-to-color aligned 16-bit raw depth image
+- capture metadata with depth scale and device identity
 
 Files are written under `captures/`.
 
-### 2. Sample aligned depth at landmark pixels
+### 2. Sample depth and physical camera XYZ
 
-The app sends the detected raw Gemini U/V coordinates back to the same capture:
+The app sends landmark pixels back to the exact capture:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/calibration/depth-samples \
@@ -75,41 +88,69 @@ curl -X POST http://127.0.0.1:8000/calibration/depth-samples \
   }'
 ```
 
-Depth is sampled from a small neighborhood in the aligned 16-bit frame. Zero/invalid pixels are discarded and the median valid raw value is converted to millimeters using that capture's recorded depth scale.
+Each valid sample returns:
 
-### 3. Save the solved Gemini-to-robot profile
+```text
+depth_mm
+camera_x_mm
+camera_y_mm
+camera_z_mm
+```
 
-FaceCapture solves the 3D mapping and uploads the active profile:
+Camera coordinates use the RGB optical frame:
+
+```text
++X = image right
++Y = image down
++Z = forward optical depth
+```
+
+All units are millimeters.
+
+The normal depth estimator uses a 5×5 median. If that window contains no depth, the existing face-consistent fallback may search slightly farther while rejecting values inconsistent with the other facial depths.
+
+The first rigid depth-sample request also records the camera calibration in that capture's metadata so the camera model used for deprojection is auditable later.
+
+### 3. Rigid camera-to-robot transform
+
+FaceCapture solves:
+
+```text
+P_robot = R * P_camera + t
+```
+
+where:
+
+- `R` is a proper 3D rotation matrix
+- `t` is a three-element translation in millimeters
+- scale is fixed to 1
+
+The active FaceCapture workflow requires at least six included correspondences, requires the nose tip, and requires at least 15 mm of camera-depth spread. It reports training residuals plus leave-one-out validation. Entered points switched off from fitting are treated as independent validation holdouts.
+
+### 4. Save the active profile
 
 ```text
 POST /calibration/profile
 GET  /calibration/profile
 ```
 
-The Pi stores the active profile in `config/gemini_robot_calibration.json`.
-
-### Calibration model
-
-For each correspondence the app forms a pinhole-compatible feature vector from raw Gemini pixels and optical depth:
+The Pi stores the active profile in:
 
 ```text
-[(u_normalized - 0.5) * depth,
- (v_normalized - 0.5) * depth,
- depth,
- 1]
+config/gemini_robot_calibration.json
 ```
 
-A least-squares affine transform maps that camera-space feature vector to Robot X/Y/Z. This absorbs the camera intrinsics and fixed camera-to-robot pose without requiring a separate flat-board homography.
+Rigid profiles use `formatVersion = 2` and store the rotation matrix, translation, camera-space and robot-space calibration correspondences, and validation metrics.
 
-Use at least six measured facial landmarks; all eight provided by the app are preferred. The current prototype requires the camera mount to remain fixed after calibration.
+### Validation before robot motion
 
-### First Gemini 215 bring-up
-
-1. Connect the Gemini directly to a USB 3 port.
-2. Run `python scripts/check_camera.py` and confirm the reported device name/serial.
-3. Start the API and check `/camera/status`.
-4. Call `POST /calibration/capture`.
-5. Open the returned color image and verify orientation/framing.
-6. Inspect the metadata and confirm depth dimensions match the color dimensions.
-7. Call `/calibration/depth-samples` on a known face pixel and confirm a plausible nonzero millimeter depth.
-8. Complete the one-stage calibration in FaceCapture and confirm `GET /calibration/profile` returns the uploaded profile.
+1. Confirm `/camera/status` reports the Gemini ready.
+2. Confirm `/camera/geometry` returns plausible nonzero intrinsics for the connected camera.
+3. Capture the mannequin in FaceCapture.
+4. Verify the RGB dots visually.
+5. Verify most landmarks have plausible Camera XYZ values.
+6. Include the nose and at least five other well-spread points.
+7. Check training and leave-one-out errors rather than training RMS alone.
+8. Save only when the rigid profile passes the selected tolerance.
+9. Confirm `GET /calibration/profile` returns `formatVersion: 2`.
+10. Perform a no-air robot positioning validation before enabling spraying.

@@ -7,6 +7,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from camera_geometry import CameraGeometryError, read_active_camera_geometry
 from gemini_camera import CAPTURE_DIR
 
 
@@ -133,9 +134,6 @@ def _face_consistent_fallback(
         candidate_u = absolute_u[consistent]
         candidate_v = absolute_v[consistent]
 
-        # Prefer pixels spatially closest to the requested landmark. Limit the
-        # median to the nearest few candidates rather than blending the whole
-        # expanded window across a depth edge.
         distances_sq = (
             (candidate_u.astype(np.float64) - center_u) ** 2
             + (candidate_v.astype(np.float64) - center_v) ** 2
@@ -150,6 +148,107 @@ def _face_consistent_fallback(
         )
 
     return None, 0, None
+
+
+def _camera_geometry_for_capture(
+    metadata: dict[str, Any],
+    metadata_path: Path,
+    *,
+    width: int,
+    height: int,
+) -> dict[str, Any]:
+    geometry = metadata.get("camera_geometry")
+    if not isinstance(geometry, dict):
+        try:
+            geometry = read_active_camera_geometry()
+        except CameraGeometryError as exc:
+            raise CalibrationDepthError(
+                "Gemini intrinsics are required for rigid 3D calibration but could not be read: "
+                + str(exc)
+            ) from exc
+
+        captured_serial = metadata.get("device", {}).get("serial_number")
+        geometry_serial = geometry.get("serial_number")
+        if captured_serial and geometry_serial and captured_serial != geometry_serial:
+            raise CalibrationDepthError(
+                "The connected Gemini serial number does not match the camera that created this capture."
+            )
+
+        metadata["camera_geometry"] = geometry
+        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    try:
+        intrinsic = geometry["rgb_intrinsic"]
+        fx = float(intrinsic["fx"])
+        fy = float(intrinsic["fy"])
+        intrinsic_width = int(intrinsic["width"])
+        intrinsic_height = int(intrinsic["height"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CalibrationDepthError("Stored Gemini RGB intrinsics are incomplete.") from exc
+
+    if fx <= 0 or fy <= 0 or intrinsic_width <= 1 or intrinsic_height <= 1:
+        raise CalibrationDepthError("Stored Gemini RGB intrinsics are invalid.")
+
+    capture_aspect = width / height
+    intrinsic_aspect = intrinsic_width / intrinsic_height
+    if abs(capture_aspect - intrinsic_aspect) > 0.01:
+        raise CalibrationDepthError(
+            "Gemini RGB intrinsics do not match the captured image aspect ratio."
+        )
+
+    return geometry
+
+
+def _deproject_color_pixel(
+    *,
+    u_px: float,
+    v_px: float,
+    depth_mm: float,
+    geometry: dict[str, Any],
+    width: int,
+    height: int,
+) -> tuple[float, float, float]:
+    intrinsic = geometry["rgb_intrinsic"]
+    distortion = geometry.get("rgb_distortion", {})
+
+    intrinsic_width = float(intrinsic["width"])
+    intrinsic_height = float(intrinsic["height"])
+    scale_x = width / intrinsic_width
+    scale_y = height / intrinsic_height
+
+    fx = float(intrinsic["fx"]) * scale_x
+    fy = float(intrinsic["fy"]) * scale_y
+    cx = float(intrinsic["cx"]) * scale_x
+    cy = float(intrinsic["cy"]) * scale_y
+
+    camera_matrix = np.array(
+        [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    coefficients = np.array(
+        [
+            float(distortion.get("k1", 0.0)),
+            float(distortion.get("k2", 0.0)),
+            float(distortion.get("p1", 0.0)),
+            float(distortion.get("p2", 0.0)),
+            float(distortion.get("k3", 0.0)),
+            float(distortion.get("k4", 0.0)),
+            float(distortion.get("k5", 0.0)),
+            float(distortion.get("k6", 0.0)),
+        ],
+        dtype=np.float64,
+    )
+
+    pixel = np.array([[[u_px, v_px]]], dtype=np.float64)
+    normalized = cv2.undistortPoints(pixel, camera_matrix, coefficients)
+    x_normalized = float(normalized[0, 0, 0])
+    y_normalized = float(normalized[0, 0, 1])
+
+    return (
+        x_normalized * depth_mm,
+        y_normalized * depth_mm,
+        depth_mm,
+    )
 
 
 def sample_capture_depth(
@@ -182,6 +281,12 @@ def sample_capture_depth(
         depth = depth.astype(np.uint16, copy=False)
 
     height, width = depth.shape
+    geometry = _camera_geometry_for_capture(
+        metadata,
+        metadata_path,
+        width=width,
+        height=height,
+    )
     validated = [_validated_point(point, width, height) for point in points]
 
     initial_samples: list[dict[str, Any]] = []
@@ -205,8 +310,6 @@ def sample_capture_depth(
             }
         )
 
-        # Use only locally well-supported points to establish the face-depth
-        # reference used by the fallback. One stray valid pixel is not enough.
         if depth_mm is not None and valid_count >= 3:
             reliable_face_depths_mm.append(depth_mm)
 
@@ -240,6 +343,17 @@ def sample_capture_depth(
                 effective_radius_px = fallback_radius
                 sample_method = "face_consistent_fallback"
 
+        camera_xyz = None
+        if depth_mm is not None:
+            camera_xyz = _deproject_color_pixel(
+                u_px=sample["u_px"],
+                v_px=sample["v_px"],
+                depth_mm=depth_mm,
+                geometry=geometry,
+                width=width,
+                height=height,
+            )
+
         samples.append(
             {
                 "id": sample["id"],
@@ -247,6 +361,9 @@ def sample_capture_depth(
                 "v_px": sample["v_px"],
                 "depth_raw": raw_value,
                 "depth_mm": depth_mm,
+                "camera_x_mm": camera_xyz[0] if camera_xyz else None,
+                "camera_y_mm": camera_xyz[1] if camera_xyz else None,
+                "camera_z_mm": camera_xyz[2] if camera_xyz else None,
                 "valid_sample_count": int(valid_count),
                 "radius_px": radius_px,
                 "effective_radius_px": effective_radius_px,
@@ -261,5 +378,11 @@ def sample_capture_depth(
         "width": width,
         "height": height,
         "depth_scale_mm": scale_mm,
+        "camera_geometry": geometry,
+        "camera_coordinate_convention": {
+            "x": "right_mm",
+            "y": "down_mm",
+            "z": "forward_optical_depth_mm",
+        },
         "samples": samples,
     }

@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from calibration_depth import CalibrationDepthError, sample_capture_depth
+from camera_geometry import CameraGeometryError, read_active_camera_geometry
 from gemini_camera import (
     CAPTURE_DIR,
     CameraCaptureError,
@@ -20,7 +21,7 @@ from gemini_camera import (
 
 app = FastAPI(
     title="MakeupRobot Pi API",
-    version="0.3.0",
+    version="0.4.0",
 )
 
 CONFIG_DIR = Path(__file__).resolve().parent / "config"
@@ -69,6 +70,17 @@ def get_status():
 @app.get("/camera/status")
 def get_camera_status():
     return camera_status()
+
+
+@app.get("/camera/geometry")
+def get_camera_geometry():
+    try:
+        return {
+            "status": "ok",
+            "geometry": read_active_camera_geometry(),
+        }
+    except CameraGeometryError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/calibration/capture")
