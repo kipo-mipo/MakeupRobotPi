@@ -42,9 +42,9 @@ def _serialize_intrinsic(intrinsic: Any) -> dict[str, Any]:
         "height": int(intrinsic.height),
     }
     if payload["fx"] <= 0 or payload["fy"] <= 0:
-        raise CameraGeometryError("Gemini RGB intrinsics contain a non-positive focal length.")
+        raise CameraGeometryError("Gemini intrinsics contain a non-positive focal length.")
     if payload["width"] <= 1 or payload["height"] <= 1:
-        raise CameraGeometryError("Gemini RGB intrinsics contain invalid image dimensions.")
+        raise CameraGeometryError("Gemini intrinsics contain invalid image dimensions.")
     return payload
 
 
@@ -55,22 +55,35 @@ def _serialize_distortion(distortion: Any) -> dict[str, float]:
     }
 
 
-def _serialize_extrinsic(extrinsic: Any) -> dict[str, list[float]]:
+def _try_serialize_extrinsic(extrinsic: Any) -> tuple[dict[str, list[float]] | None, str | None]:
+    """Best-effort diagnostic only.
+
+    Some pyorbbecsdk builds expose a broken or non-iterable OBExtrinsic Python
+    binding. Rigid calibration does not depend on reading this object directly:
+    AlignFilter already performs depth-to-color registration, and camera XYZ is
+    deprojected in the RGB optical frame using RGB intrinsics/distortion.
+    """
     try:
-        rotation = [float(value) for value in extrinsic.rot]
-        translation = [float(value) for value in extrinsic.transform]
+        rotation = np.asarray(extrinsic.rot, dtype=np.float64).reshape(-1).tolist()
+        translation = np.asarray(extrinsic.transform, dtype=np.float64).reshape(-1).tolist()
     except Exception as exc:
-        raise CameraGeometryError("Gemini depth-to-color extrinsic could not be read.") from exc
+        return None, f"{type(exc).__name__}: {exc}"
 
     if len(rotation) != 9 or len(translation) != 3:
-        raise CameraGeometryError("Gemini depth-to-color extrinsic has an unexpected shape.")
+        return None, (
+            "Unexpected depth-to-color extrinsic shape: "
+            f"rotation={len(rotation)}, translation={len(translation)}"
+        )
     if not all(np.isfinite(value) for value in rotation + translation):
-        raise CameraGeometryError("Gemini depth-to-color extrinsic contains non-finite values.")
+        return None, "Depth-to-color extrinsic contains non-finite values."
 
-    return {
-        "rotation_row_major": rotation,
-        "translation_mm": translation,
-    }
+    return (
+        {
+            "rotation_row_major": [float(value) for value in rotation],
+            "translation_mm": [float(value) for value in translation],
+        },
+        None,
+    )
 
 
 def read_active_camera_geometry(*, timeout_seconds: float = 5.0) -> dict[str, Any]:
@@ -106,7 +119,7 @@ def read_active_camera_geometry(*, timeout_seconds: float = 5.0) -> dict[str, An
         depth_intrinsic = _serialize_intrinsic(camera_param.depth_intrinsic)
         rgb_distortion = _serialize_distortion(camera_param.rgb_distortion)
         depth_distortion = _serialize_distortion(camera_param.depth_distortion)
-        depth_to_color = _serialize_extrinsic(camera_param.transform)
+        depth_to_color, depth_to_color_error = _try_serialize_extrinsic(camera_param.transform)
 
         return {
             "model": "pinhole_with_distortion",
@@ -117,6 +130,8 @@ def read_active_camera_geometry(*, timeout_seconds: float = 5.0) -> dict[str, An
             "depth_intrinsic": depth_intrinsic,
             "depth_distortion": depth_distortion,
             "depth_to_color": depth_to_color,
+            "depth_to_color_error": depth_to_color_error,
+            "depth_to_color_required_for_rigid_calibration": False,
         }
     except CameraGeometryError:
         raise
