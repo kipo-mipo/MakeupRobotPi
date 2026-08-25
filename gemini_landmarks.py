@@ -19,17 +19,20 @@ except ImportError:
     mp = None
 
 from gemini_camera import CAPTURE_DIR
+from gemini_orientation import (
+    capture_display_rotation,
+    get_mount_rotation_degrees,
+    rotate_image_for_display,
+)
 
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "face_landmarker.task"
 MODEL_MINIMUM_CONFIDENCE = 0.50
 _CAPTURE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
-# The app's existing Left/Right convention is image-relative in the native,
-# unmirrored Gemini RGB frame (left side of preview = "Left"). MediaPipe mesh
-# indices are anatomical, so the eye/mouth indices are intentionally swapped
-# here to preserve the app/robot convention users have already measured with.
-# Only visually targetable points are selected; generic mesh vertices would add
-# manual measurement noise without meaningfully improving the rigid fit.
+# Left/right are image-relative in the upright, unmirrored calibration preview.
+# MediaPipe mesh indices are anatomical, so eye/mouth indices are intentionally
+# mapped to preserve the app/robot convention. Only visually targetable points
+# are selected; generic mesh vertices add manual measurement noise.
 CALIBRATION_LANDMARKS: tuple[tuple[str, str, int, bool], ...] = (
     ("left_outer_eye", "Left outer eye", 33, True),
     ("left_iris_center", "Left iris center", 468, False),
@@ -78,12 +81,14 @@ class GeminiFaceLandmarker:
             "mediapipe_version": self._mediapipe_version(),
             "landmark_count_requested": len(CALIBRATION_LANDMARKS),
             "landmark_ids": [item[0] for item in CALIBRATION_LANDMARKS],
+            "configured_display_rotation_degrees": get_mount_rotation_degrees(),
         }
 
     def detect_capture(self, capture_id: str) -> dict[str, Any]:
         with self._lock:
             self._ensure_ready()
             metadata = self._load_metadata(capture_id)
+            rotation_degrees = capture_display_rotation(metadata)
             color = metadata.get("color") or {}
             filename = color.get("filename")
             width = int(color.get("width") or 0)
@@ -101,15 +106,16 @@ class GeminiFaceLandmarker:
                     f"image={image_bgr.shape[1]}x{image_bgr.shape[0]}, metadata={width}x{height}."
                 )
 
-            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
+            raw_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            display_rgb = rotate_image_for_display(raw_rgb, rotation_degrees)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=display_rgb)
             try:
                 result = self._landmarker.detect(mp_image)
             except Exception as exc:
                 raise GeminiLandmarkError(f"MediaPipe face landmark detection failed: {exc}") from exc
 
             if not result.face_landmarks:
-                raise GeminiFaceNotFound("MediaPipe did not find a face in the Gemini RGB frame.")
+                raise GeminiFaceNotFound("MediaPipe did not find a face in the upright Gemini RGB frame.")
 
             face = result.face_landmarks[0]
             selected: list[dict[str, Any]] = []
@@ -150,13 +156,15 @@ class GeminiFaceLandmarker:
                 "capture_id": capture_id,
                 "width": width,
                 "height": height,
+                "display_rotation_degrees": rotation_degrees,
+                "pixel_coordinate_system": "upright_display_pixels",
                 "landmarks": selected,
                 "omitted_landmarks": omitted,
                 "detector": {
                     "name": "MediaPipe Face Landmarker",
                     "version": self._mediapipe_version(),
                     "landmark_set": "makeuprobot_gemini_rigid_v3",
-                    "left_right_convention": "image_relative_native_unmirrored",
+                    "left_right_convention": "image_relative_upright_unmirrored",
                     "model_path": str(self.model_path),
                 },
             }
