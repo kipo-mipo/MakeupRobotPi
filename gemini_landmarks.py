@@ -24,21 +24,24 @@ DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "face_landmark
 MODEL_MINIMUM_CONFIDENCE = 0.50
 _CAPTURE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
-# MediaPipe Face Landmarker indices. Left/right are anatomical subject sides.
-# These are deliberately limited to points a human can target repeatably with
-# the robot. Hundreds of generic mesh vertices would add measurement noise.
+# The app's existing Left/Right convention is image-relative in the native,
+# unmirrored Gemini RGB frame (left side of preview = "Left"). MediaPipe mesh
+# indices are anatomical, so the eye/mouth indices are intentionally swapped
+# here to preserve the app/robot convention users have already measured with.
+# Only visually targetable points are selected; generic mesh vertices would add
+# manual measurement noise without meaningfully improving the rigid fit.
 CALIBRATION_LANDMARKS: tuple[tuple[str, str, int, bool], ...] = (
-    ("left_outer_eye", "Left outer eye", 263, True),
-    ("left_iris_center", "Left iris center", 473, False),
-    ("left_inner_eye", "Left inner eye", 362, True),
-    ("right_inner_eye", "Right inner eye", 133, True),
-    ("right_iris_center", "Right iris center", 468, False),
-    ("right_outer_eye", "Right outer eye", 33, True),
+    ("left_outer_eye", "Left outer eye", 33, True),
+    ("left_iris_center", "Left iris center", 468, False),
+    ("left_inner_eye", "Left inner eye", 133, True),
+    ("right_inner_eye", "Right inner eye", 362, True),
+    ("right_iris_center", "Right iris center", 473, False),
+    ("right_outer_eye", "Right outer eye", 263, True),
     ("nose_bridge", "Nose bridge", 168, True),
     ("nose_tip", "Nose tip", 1, True),
-    ("left_mouth_corner", "Left mouth corner", 291, True),
+    ("left_mouth_corner", "Left mouth corner", 61, True),
     ("upper_lip_center", "Upper lip center", 0, True),
-    ("right_mouth_corner", "Right mouth corner", 61, True),
+    ("right_mouth_corner", "Right mouth corner", 291, True),
     ("lower_lip_center", "Lower lip center", 17, True),
     ("chin", "Chin", 152, True),
 )
@@ -153,7 +156,7 @@ class GeminiFaceLandmarker:
                     "name": "MediaPipe Face Landmarker",
                     "version": self._mediapipe_version(),
                     "landmark_set": "makeuprobot_gemini_rigid_v3",
-                    "left_right_convention": "anatomical_subject",
+                    "left_right_convention": "image_relative_native_unmirrored",
                     "model_path": str(self.model_path),
                 },
             }
