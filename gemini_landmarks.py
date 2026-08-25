@@ -10,9 +10,12 @@ from typing import Any
 
 try:
     import cv2
-    import mediapipe as mp
 except ImportError:
     cv2 = None
+
+try:
+    import mediapipe as mp
+except ImportError:
     mp = None
 
 from gemini_camera import CAPTURE_DIR
