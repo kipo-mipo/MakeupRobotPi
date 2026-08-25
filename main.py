@@ -23,11 +23,17 @@ from gemini_landmarks import (
     GeminiLandmarkError,
     GeminiLandmarkUnavailable,
 )
+from gemini_orientation import (
+    GeminiOrientationError,
+    mount_orientation_status,
+    prepare_capture_display,
+    set_mount_rotation_degrees,
+)
 
 
 app = FastAPI(
     title="MakeupRobot Pi API",
-    version="0.5.0",
+    version="0.6.0",
 )
 
 CONFIG_DIR = Path(__file__).resolve().parent / "config"
@@ -53,6 +59,10 @@ class DepthSampleRequest(BaseModel):
 
 class LandmarkRequest(BaseModel):
     capture_id: str
+
+
+class MountOrientationRequest(BaseModel):
+    rotation_degrees: int
 
 
 class CalibrationProfileEnvelope(BaseModel):
@@ -93,6 +103,22 @@ def get_camera_geometry():
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@app.get("/camera/mount-orientation")
+def get_mount_orientation():
+    try:
+        return mount_orientation_status()
+    except GeminiOrientationError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/camera/mount-orientation")
+def set_mount_orientation(data: MountOrientationRequest):
+    try:
+        return set_mount_rotation_degrees(data.rotation_degrees)
+    except GeminiOrientationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/calibration/landmarks/status")
 def get_landmark_status():
     return {
@@ -105,18 +131,27 @@ def get_landmark_status():
 def create_calibration_capture():
     try:
         result = capture_calibration()
+        display = prepare_capture_display(
+            capture_id=result.capture_id,
+            color_filename=result.color_filename,
+            metadata_filename=result.metadata_filename,
+        )
     except CameraUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except CameraCaptureError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except GeminiOrientationError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     payload = result.as_dict()
     payload.update(
         {
             "status": "ok",
-            "color_url": f"/captures/{result.color_filename}",
+            "color_url": f"/captures/{display['display_color_filename']}",
             "depth_url": f"/captures/{result.depth_filename}",
             "metadata_url": f"/captures/{result.metadata_filename}",
+            "display_rotation_degrees": display["rotation_degrees"],
+            "pixel_coordinate_system": "upright_display_pixels",
         }
     )
     return payload
