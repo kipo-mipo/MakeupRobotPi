@@ -17,11 +17,17 @@ from gemini_camera import (
     camera_status,
     capture_calibration,
 )
+from gemini_landmarks import (
+    FACE_LANDMARKER,
+    GeminiFaceNotFound,
+    GeminiLandmarkError,
+    GeminiLandmarkUnavailable,
+)
 
 
 app = FastAPI(
     title="MakeupRobot Pi API",
-    version="0.4.0",
+    version="0.5.0",
 )
 
 CONFIG_DIR = Path(__file__).resolve().parent / "config"
@@ -43,6 +49,10 @@ class DepthSampleRequest(BaseModel):
     capture_id: str
     points: list[DepthSamplePoint]
     radius_px: int = 2
+
+
+class LandmarkRequest(BaseModel):
+    capture_id: str
 
 
 class CalibrationProfileEnvelope(BaseModel):
@@ -83,6 +93,14 @@ def get_camera_geometry():
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@app.get("/calibration/landmarks/status")
+def get_landmark_status():
+    return {
+        "status": "ok",
+        "landmarker": FACE_LANDMARKER.status(),
+    }
+
+
 @app.post("/calibration/capture")
 def create_calibration_capture():
     try:
@@ -102,6 +120,18 @@ def create_calibration_capture():
         }
     )
     return payload
+
+
+@app.post("/calibration/landmarks")
+def create_calibration_landmarks(data: LandmarkRequest):
+    try:
+        return FACE_LANDMARKER.detect_capture(data.capture_id)
+    except GeminiLandmarkUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except GeminiFaceNotFound as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except GeminiLandmarkError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/calibration/depth-samples")
