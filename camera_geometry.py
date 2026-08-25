@@ -12,6 +12,7 @@ from gemini_camera import (
     OBFrameAggregateOutputMode,
     Pipeline,
     _require_dependencies,
+    _safe_info_call,
     _select_color_profile,
     _select_depth_profile,
 )
@@ -99,6 +100,7 @@ def read_active_camera_geometry(*, timeout_seconds: float = 5.0) -> dict[str, An
         if frame_set is None:
             raise CameraGeometryError("Timed out waiting for Gemini frames before reading camera intrinsics.")
 
+        device_info = pipeline.get_device().get_device_info()
         camera_param = pipeline.get_camera_param()
         rgb_intrinsic = _serialize_intrinsic(camera_param.rgb_intrinsic)
         depth_intrinsic = _serialize_intrinsic(camera_param.depth_intrinsic)
@@ -108,6 +110,8 @@ def read_active_camera_geometry(*, timeout_seconds: float = 5.0) -> dict[str, An
 
         return {
             "model": "pinhole_with_distortion",
+            "device_name": _safe_info_call(device_info, "get_name"),
+            "serial_number": _safe_info_call(device_info, "get_serial_number"),
             "rgb_intrinsic": rgb_intrinsic,
             "rgb_distortion": rgb_distortion,
             "depth_intrinsic": depth_intrinsic,
