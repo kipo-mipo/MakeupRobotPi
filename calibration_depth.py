@@ -71,7 +71,7 @@ def _validated_point(
     center_v = int(round(raw_v))
     if center_u < 0 or center_u >= width or center_v < 0 or center_v >= height:
         raise CalibrationDepthError(
-            f"Depth point {point_id or '<unnamed>'} maps outside the raw aligned image ({width}x{height})."
+            f"Depth point {point_id or '<unnamed>'} maps outside the native RGB image ({width}x{height})."
         )
 
     return {
@@ -80,8 +80,6 @@ def _validated_point(
         "display_v_px": display_v,
         "raw_u_px": raw_u,
         "raw_v_px": raw_v,
-        "center_u": center_u,
-        "center_v": center_v,
     }
 
 
@@ -458,6 +456,12 @@ def sample_capture_depth(
                 "raw_v_px": sample["raw_v_px"],
                 "aligned_u_px": sample["aligned_u_px"],
                 "aligned_v_px": sample["aligned_v_px"],
+                "distortion_shift_px": float(
+                    np.hypot(
+                        sample["aligned_u_px"] - sample["raw_u_px"],
+                        sample["aligned_v_px"] - sample["raw_v_px"],
+                    )
+                ),
                 "depth_raw": raw_value,
                 "depth_mm": depth_mm,
                 "camera_x_mm": camera_xyz[0] if camera_xyz else None,
