@@ -8,13 +8,14 @@ The active calibration is a physical 3D camera-to-robot calibration. There is no
 
 For each facial landmark:
 
-1. The Pi captures native Gemini RGB plus software-aligned depth.
-2. MediaPipe Face Landmarker runs on that exact Gemini RGB frame and returns selected raw RGB `U/V` points.
-3. The Pi samples the matching aligned depth frame at those same pixels.
-4. The Pi reads the Gemini RGB intrinsics and distortion calibration from the active Orbbec stream profiles.
-5. Each raw RGB pixel plus aligned depth is undistorted and deprojected into Gemini optical camera coordinates in millimeters: `Camera X/Y/Z`.
-6. FaceCapture pairs that camera-space point with measured `Robot X/Y/Z`.
-7. FaceCapture solves one rigid transform only: a 3×3 rotation plus a 3D translation.
+1. The Pi captures native distorted Gemini RGB plus software depth-to-color aligned depth.
+2. The Pi rotates only the display/detector copy when the camera mount is configured at 180°.
+3. MediaPipe Face Landmarker runs on that upright RGB view and returns selected display `U/V` points.
+4. The Pi maps each display point back to the native distorted RGB pixel.
+5. Using the Gemini RGB intrinsics and distortion coefficients, the Pi undistorts that RGB pixel onto the undistorted color grid used by the aligned depth image.
+6. The Pi samples aligned depth at that corrected pixel, then deprojects the same undistorted pixel plus depth into Gemini RGB optical `Camera X/Y/Z` in millimeters.
+7. FaceCapture pairs that camera-space point with measured `Robot X/Y/Z`.
+8. FaceCapture solves one rigid transform only: a 3×3 rotation plus a 3D translation.
 
 The solver is not allowed to stretch, shear, or independently scale axes. That prevents a low-residual affine fit from hiding an incorrect physical mapping.
 
@@ -61,7 +62,7 @@ Then run `shared/setup_env.py` from that directory with the permissions it reque
 python main.py
 ```
 
-The MediaPipe rigid-calibration API reports version `0.5.0`.
+The MediaPipe rigid-calibration API reports version `0.7.0`.
 
 ### Check camera discovery
 
@@ -118,7 +119,7 @@ The response contains the selected MediaPipe point IDs, raw Gemini RGB `u_px/v_p
 
 ### 3. Sample depth and physical camera XYZ
 
-The app sends those exact MediaPipe pixels back to the exact capture:
+The app sends those exact MediaPipe display pixels back to the exact capture. The Pi maps them to native distorted RGB pixels, undistorts them onto the aligned-depth grid, and only then samples depth:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/calibration/depth-samples \
@@ -132,9 +133,13 @@ curl -X POST http://127.0.0.1:8000/calibration/depth-samples \
   }'
 ```
 
-Each valid sample returns:
+Each valid sample returns the user-facing display pixel plus diagnostic native/aligned pixels and physical camera coordinates:
 
 ```text
+u_px / v_px                 # upright display / MediaPipe pixel
+raw_u_px / raw_v_px         # native distorted Gemini RGB pixel
+aligned_u_px / aligned_v_px # undistorted color-aligned depth pixel
+distortion_shift_px
 depth_mm
 camera_x_mm
 camera_y_mm
@@ -151,7 +156,7 @@ Camera coordinates use the RGB optical frame:
 
 All units are millimeters.
 
-The normal depth estimator uses a 5×5 median. If that window contains no depth, the existing face-consistent fallback may search slightly farther while rejecting values inconsistent with the other facial depths.
+The normal depth estimator uses a 5×5 median centered on the undistorted color-aligned pixel. If that window contains no depth, the existing face-consistent fallback may search slightly farther while rejecting values inconsistent with the other facial depths.
 
 The first rigid depth-sample request also records the camera calibration in that capture's metadata so the camera model used for deprojection is auditable later.
 

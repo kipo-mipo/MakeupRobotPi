@@ -71,7 +71,7 @@ def _validated_point(
     center_v = int(round(raw_v))
     if center_u < 0 or center_u >= width or center_v < 0 or center_v >= height:
         raise CalibrationDepthError(
-            f"Depth point {point_id or '<unnamed>'} maps outside the raw aligned image ({width}x{height})."
+            f"Depth point {point_id or '<unnamed>'} maps outside the native RGB image ({width}x{height})."
         )
 
     return {
@@ -80,8 +80,6 @@ def _validated_point(
         "display_v_px": display_v,
         "raw_u_px": raw_u,
         "raw_v_px": raw_v,
-        "center_u": center_u,
-        "center_v": center_v,
     }
 
 
@@ -223,15 +221,12 @@ def _camera_geometry_for_capture(
     return geometry
 
 
-def _deproject_color_pixel(
+def _scaled_rgb_camera_model(
     *,
-    u_px: float,
-    v_px: float,
-    depth_mm: float,
     geometry: dict[str, Any],
     width: int,
     height: int,
-) -> tuple[float, float, float]:
+) -> tuple[np.ndarray, np.ndarray]:
     intrinsic = geometry["rgb_intrinsic"]
     distortion = geometry.get("rgb_distortion", {})
 
@@ -262,18 +257,69 @@ def _deproject_color_pixel(
         ],
         dtype=np.float64,
     )
+    return camera_matrix, coefficients
 
-    pixel = np.array([[[u_px, v_px]]], dtype=np.float64)
-    normalized = cv2.undistortPoints(pixel, camera_matrix, coefficients)
-    x_normalized = float(normalized[0, 0, 0])
-    y_normalized = float(normalized[0, 0, 1])
+
+def _distorted_rgb_to_aligned_pixel(
+    *,
+    raw_u_px: float,
+    raw_v_px: float,
+    geometry: dict[str, Any],
+    width: int,
+    height: int,
+) -> tuple[float, float]:
+    """Map a raw distorted RGB pixel onto Orbbec's undistorted D2C image grid."""
+    camera_matrix, coefficients = _scaled_rgb_camera_model(
+        geometry=geometry,
+        width=width,
+        height=height,
+    )
+    pixel = np.array([[[raw_u_px, raw_v_px]]], dtype=np.float64)
+
+    # Orbbec software depth-to-color alignment produces depth on the color
+    # camera's undistorted image grid. MediaPipe sees the original distorted
+    # RGB frame, so convert that landmark to the matching undistorted pixel
+    # before sampling aligned depth.
+    undistorted = cv2.undistortPoints(
+        pixel,
+        camera_matrix,
+        coefficients,
+        P=camera_matrix,
+    )
+    return (
+        float(undistorted[0, 0, 0]),
+        float(undistorted[0, 0, 1]),
+    )
+
+
+def _deproject_aligned_color_pixel(
+    *,
+    aligned_u_px: float,
+    aligned_v_px: float,
+    depth_mm: float,
+    geometry: dict[str, Any],
+    width: int,
+    height: int,
+) -> tuple[float, float, float]:
+    """Deproject an undistorted aligned-depth pixel into RGB optical XYZ."""
+    camera_matrix, _ = _scaled_rgb_camera_model(
+        geometry=geometry,
+        width=width,
+        height=height,
+    )
+    fx = float(camera_matrix[0, 0])
+    fy = float(camera_matrix[1, 1])
+    cx = float(camera_matrix[0, 2])
+    cy = float(camera_matrix[1, 2])
+
+    x_normalized = (aligned_u_px - cx) / fx
+    y_normalized = (aligned_v_px - cy) / fy
 
     return (
         x_normalized * depth_mm,
         y_normalized * depth_mm,
         depth_mm,
     )
-
 
 def sample_capture_depth(
     capture_id: str,
@@ -316,6 +362,25 @@ def sample_capture_depth(
         _validated_point(point, width, height, rotation_degrees)
         for point in points
     ]
+    for point in validated:
+        aligned_u, aligned_v = _distorted_rgb_to_aligned_pixel(
+            raw_u_px=point["raw_u_px"],
+            raw_v_px=point["raw_v_px"],
+            geometry=geometry,
+            width=width,
+            height=height,
+        )
+        center_u = int(round(aligned_u))
+        center_v = int(round(aligned_v))
+        if center_u < 0 or center_u >= width or center_v < 0 or center_v >= height:
+            raise CalibrationDepthError(
+                f"Depth point {point['id'] or '<unnamed>'} undistorts outside "
+                f"the aligned depth image ({width}x{height})."
+            )
+        point["aligned_u_px"] = aligned_u
+        point["aligned_v_px"] = aligned_v
+        point["center_u"] = center_u
+        point["center_v"] = center_v
 
     initial_samples: list[dict[str, Any]] = []
     reliable_face_depths_mm: list[float] = []
@@ -373,9 +438,9 @@ def sample_capture_depth(
 
         camera_xyz = None
         if depth_mm is not None:
-            camera_xyz = _deproject_color_pixel(
-                u_px=sample["raw_u_px"],
-                v_px=sample["raw_v_px"],
+            camera_xyz = _deproject_aligned_color_pixel(
+                aligned_u_px=sample["aligned_u_px"],
+                aligned_v_px=sample["aligned_v_px"],
                 depth_mm=depth_mm,
                 geometry=geometry,
                 width=width,
@@ -389,6 +454,14 @@ def sample_capture_depth(
                 "v_px": sample["display_v_px"],
                 "raw_u_px": sample["raw_u_px"],
                 "raw_v_px": sample["raw_v_px"],
+                "aligned_u_px": sample["aligned_u_px"],
+                "aligned_v_px": sample["aligned_v_px"],
+                "distortion_shift_px": float(
+                    np.hypot(
+                        sample["aligned_u_px"] - sample["raw_u_px"],
+                        sample["aligned_v_px"] - sample["raw_v_px"],
+                    )
+                ),
                 "depth_raw": raw_value,
                 "depth_mm": depth_mm,
                 "camera_x_mm": camera_xyz[0] if camera_xyz else None,
@@ -410,7 +483,9 @@ def sample_capture_depth(
         "depth_scale_mm": scale_mm,
         "display_rotation_degrees": rotation_degrees,
         "pixel_coordinate_system": "upright_display_pixels",
-        "raw_pixel_coordinate_system": "native_gemini_rgb_pixels",
+        "raw_pixel_coordinate_system": "native_distorted_gemini_rgb_pixels",
+        "depth_pixel_coordinate_system": "undistorted_color_aligned_pixels",
+        "distortion_mapping": "raw_rgb_undistort_to_aligned_depth_before_sampling",
         "camera_geometry": geometry,
         "camera_coordinate_convention": {
             "x": "right_mm_in_raw_rgb_optical_frame",

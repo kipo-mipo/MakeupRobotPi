@@ -33,7 +33,7 @@ from gemini_orientation import (
 
 app = FastAPI(
     title="MakeupRobot Pi API",
-    version="0.6.0",
+    version="0.7.0",
 )
 
 CONFIG_DIR = Path(__file__).resolve().parent / "config"
