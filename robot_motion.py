@@ -264,10 +264,12 @@ def build_test_move_plan(
         raise RobotMotionError("Calibration test feed rates must be positive.")
 
     commands = [
+        "M400",
         "G90",
         f"G0 Y{safe:.3f} F{retract_feed:.0f}",
         f"G0 X{target[0]:.3f} Z{target[2]:.3f} F{travel_feed:.0f}",
         f"G0 Y{target[1]:.3f} F{approach_feed:.0f}",
+        "M400",
     ]
     return {
         "target": {"x_mm": target[0], "y_mm": target[1], "z_mm": target[2]},
@@ -334,7 +336,6 @@ def emergency_stop() -> dict[str, Any]:
         _request_json(
             "POST",
             "/printer/emergency_stop",
-            {},
             timeout_seconds=4.0,
         )
     )
