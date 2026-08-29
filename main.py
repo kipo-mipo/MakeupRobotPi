@@ -29,11 +29,19 @@ from gemini_orientation import (
     prepare_capture_display,
     set_mount_rotation_degrees,
 )
+from robot_motion import (
+    RobotMotionError,
+    RobotMotionUnavailable,
+    emergency_stop,
+    retract_to_safe_y,
+    robot_status,
+    test_move,
+)
 
 
 app = FastAPI(
     title="MakeupRobot Pi API",
-    version="0.7.0",
+    version="0.8.0",
 )
 
 CONFIG_DIR = Path(__file__).resolve().parent / "config"
@@ -67,6 +75,13 @@ class MountOrientationRequest(BaseModel):
 
 class CalibrationProfileEnvelope(BaseModel):
     profile: dict[str, Any]
+
+
+class RobotTestMoveRequest(BaseModel):
+    x_mm: float
+    y_mm: float
+    z_mm: float
+    execute: bool = False
 
 
 @app.get("/")
@@ -205,6 +220,44 @@ def get_calibration_profile():
     if not ACTIVE_CALIBRATION_PATH.is_file():
         raise HTTPException(status_code=404, detail="No active Gemini-to-robot calibration is saved.")
     return json.loads(ACTIVE_CALIBRATION_PATH.read_text(encoding="utf-8"))
+
+
+@app.get("/robot/status")
+def get_robot_status():
+    return robot_status()
+
+
+@app.post("/robot/test-move")
+def create_robot_test_move(data: RobotTestMoveRequest):
+    try:
+        return test_move(
+            x_mm=data.x_mm,
+            y_mm=data.y_mm,
+            z_mm=data.z_mm,
+            execute=data.execute,
+        )
+    except RobotMotionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RobotMotionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/robot/retract")
+def create_robot_retract():
+    try:
+        return retract_to_safe_y()
+    except RobotMotionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RobotMotionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/robot/emergency-stop")
+def create_robot_emergency_stop():
+    try:
+        return emergency_stop()
+    except RobotMotionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/captures/{filename}")
