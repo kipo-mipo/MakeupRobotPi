@@ -4,7 +4,6 @@ import json
 import math
 import os
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -319,7 +318,7 @@ def test_move(
             "POST",
             "/printer/gcode/script",
             {"script": plan["script"]},
-            timeout_seconds=20.0,
+            timeout_seconds=90.0,
         )
     )
     return {
@@ -364,7 +363,7 @@ def retract_to_safe_y() -> dict[str, Any]:
             "POST",
             "/printer/gcode/script",
             {"script": "\n".join(commands)},
-            timeout_seconds=20.0,
+            timeout_seconds=60.0,
         )
     )
     return {
