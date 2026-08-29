@@ -234,10 +234,12 @@ curl -X POST http://127.0.0.1:8000/robot/test-move \
 The move sequence is intentionally conservative:
 
 ```text
+wait for queued motion
 G90
 retract Y to the safe plane
 move X/Z while retracted
 advance Y to the test target
+wait until the target move is physically complete
 ```
 
 The default safe plane is Robot `Y=0 mm`, matching the calibration convention that +Y approaches the face. Override it with `ROBOT_TEST_SAFE_Y_MM` only if the physical robot uses a different retracted plane. Feed rates may be overridden with `ROBOT_TEST_RETRACT_FEED_MM_MIN`, `ROBOT_TEST_TRAVEL_FEED_MM_MIN`, and `ROBOT_TEST_APPROACH_FEED_MM_MIN`.
