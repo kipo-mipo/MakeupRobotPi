@@ -20,10 +20,12 @@ class CalibrationPointMotionPlanTests(unittest.TestCase):
         self.assertEqual(
             plan["commands"],
             [
+                "M400",
                 "G90",
                 "G0 Y0.000 F900",
                 "G0 X120.000 Z80.000 F1800",
                 "G0 Y135.000 F600",
+                "M400",
             ],
         )
         self.assertEqual(plan["target"]["x_mm"], 120.0)
