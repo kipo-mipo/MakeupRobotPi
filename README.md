@@ -62,7 +62,7 @@ Then run `shared/setup_env.py` from that directory with the permissions it reque
 python main.py
 ```
 
-The MediaPipe rigid-calibration API reports version `0.7.0`.
+The MediaPipe rigid-calibration API reports version `0.8.0`.
 
 ### Check camera discovery
 
@@ -193,6 +193,63 @@ config/gemini_robot_calibration.json
 
 Current MediaPipe rigid profiles use `formatVersion = 3` and store the rotation matrix, translation, camera-space and robot-space calibration correspondences, and validation metrics.
 
+### 6. Calibration point tester
+
+The Pi exposes a guarded dry-run motion path through the local Moonraker/Klipper API. By default Moonraker is expected at:
+
+```text
+http://127.0.0.1:7125
+```
+
+Override it when needed:
+
+```bash
+export MOONRAKER_URL=http://127.0.0.1:7125
+```
+
+Check whether motion testing is allowed:
+
+```bash
+curl http://127.0.0.1:8000/robot/status
+```
+
+The Pi reports Klipper state, homed axes, current position, axis limits, and the configured safe Y plane. Test motion is blocked unless Klipper is ready, X/Y/Z are homed, no print is active or paused, and the target lies inside Klipper's reported axis limits.
+
+Preview a target without moving:
+
+```bash
+curl -X POST http://127.0.0.1:8000/robot/test-move \
+  -H 'Content-Type: application/json' \
+  -d '{"x_mm":120,"y_mm":135,"z_mm":80,"execute":false}'
+```
+
+Execute the same target:
+
+```bash
+curl -X POST http://127.0.0.1:8000/robot/test-move \
+  -H 'Content-Type: application/json' \
+  -d '{"x_mm":120,"y_mm":135,"z_mm":80,"execute":true}'
+```
+
+The move sequence is intentionally conservative:
+
+```text
+G90
+retract Y to the safe plane
+move X/Z while retracted
+advance Y to the test target
+```
+
+The default safe plane is Robot `Y=0 mm`, matching the calibration convention that +Y approaches the face. Override it with `ROBOT_TEST_SAFE_Y_MM` only if the physical robot uses a different retracted plane. Feed rates may be overridden with `ROBOT_TEST_RETRACT_FEED_MM_MIN`, `ROBOT_TEST_TRAVEL_FEED_MM_MIN`, and `ROBOT_TEST_APPROACH_FEED_MM_MIN`.
+
+Emergency stop:
+
+```bash
+curl -X POST http://127.0.0.1:8000/robot/emergency-stop
+```
+
+The point tester assumes the Robot X/Y/Z values used during calibration are the same Klipper X/Y/Z coordinates in millimeters.
+
 ### Validation before robot motion
 
 1. Confirm `/camera/status` reports the Gemini ready.
@@ -206,4 +263,5 @@ Current MediaPipe rigid profiles use `formatVersion = 3` and store the rotation 
 9. Check training and leave-one-out errors rather than training RMS alone.
 10. Save only when the rigid profile passes the selected tolerance.
 11. Confirm `GET /calibration/profile` returns `formatVersion: 3`.
-12. Perform a no-air robot positioning validation before enabling spraying.
+12. Use the calibration point tester with the pointer arm and air disabled.
+13. Confirm multiple physical targets before enabling spraying.
