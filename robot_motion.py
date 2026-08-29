@@ -331,6 +331,51 @@ def test_move(
     }
 
 
+def retract_to_safe_y() -> dict[str, Any]:
+    status = robot_status()
+    if status.get("status") != "ok":
+        raise RobotMotionUnavailable(status.get("error") or "Robot status is unavailable.")
+    if not status.get("ready"):
+        raise RobotMotionError(status.get("error") or "Robot is not ready for motion.")
+
+    axis_minimum, axis_maximum = _axis_limits(status)
+    safe = safe_y_mm()
+    if safe < axis_minimum[1] or safe > axis_maximum[1]:
+        raise RobotMotionError(
+            f"Safe Robot Y={safe:.3f} mm is outside Klipper Y limits "
+            f"[{axis_minimum[1]:.3f}, {axis_maximum[1]:.3f}]."
+        )
+
+    retract_feed = _env_float(
+        "ROBOT_TEST_RETRACT_FEED_MM_MIN",
+        DEFAULT_RETRACT_FEED_MM_MIN,
+    )
+    if retract_feed <= 0:
+        raise RobotMotionError("Calibration retract feed rate must be positive.")
+
+    commands = [
+        "M400",
+        "G90",
+        f"G0 Y{safe:.3f} F{retract_feed:.0f}",
+        "M400",
+    ]
+    response = _result(
+        _request_json(
+            "POST",
+            "/printer/gcode/script",
+            {"script": "\n".join(commands)},
+            timeout_seconds=20.0,
+        )
+    )
+    return {
+        "status": "ok",
+        "retracted": True,
+        "safe_y_mm": safe,
+        "commands": commands,
+        "moonraker_result": response,
+    }
+
+
 def emergency_stop() -> dict[str, Any]:
     response = _result(
         _request_json(
