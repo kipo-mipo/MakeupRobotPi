@@ -33,6 +33,7 @@ from robot_motion import (
     RobotMotionError,
     RobotMotionUnavailable,
     emergency_stop,
+    retract_to_safe_y,
     robot_status,
     test_move,
 )
@@ -235,6 +236,16 @@ def create_robot_test_move(data: RobotTestMoveRequest):
             z_mm=data.z_mm,
             execute=data.execute,
         )
+    except RobotMotionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RobotMotionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/robot/retract")
+def create_robot_retract():
+    try:
+        return retract_to_safe_y()
     except RobotMotionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except RobotMotionError as exc:
