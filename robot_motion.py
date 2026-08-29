@@ -220,10 +220,10 @@ def build_test_move_plan(
         _finite(y_mm, "Robot Y"),
         _finite(z_mm, "Robot Z"),
     ]
-    minimum = [_finite(axis_minimum[i], f"axis_minimum[{i}]") for i in range(3)]
-    maximum = [_finite(axis_maximum[i], f"axis_maximum[{i}]") for i in range(3)]
     if len(axis_minimum) < 3 or len(axis_maximum) < 3:
         raise RobotMotionError("XYZ axis limits are required.")
+    minimum = [_finite(axis_minimum[i], f"axis_minimum[{i}]") for i in range(3)]
+    maximum = [_finite(axis_maximum[i], f"axis_maximum[{i}]") for i in range(3)]
 
     labels = ("X", "Y", "Z")
     for index, value in enumerate(target):
