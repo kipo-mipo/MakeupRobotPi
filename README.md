@@ -244,6 +244,12 @@ wait until the target move is physically complete
 
 The default safe plane is Robot `Y=0 mm`, matching the calibration convention that +Y approaches the face. Override it with `ROBOT_TEST_SAFE_Y_MM` only if the physical robot uses a different retracted plane. Feed rates may be overridden with `ROBOT_TEST_RETRACT_FEED_MM_MIN`, `ROBOT_TEST_TRAVEL_FEED_MM_MIN`, and `ROBOT_TEST_APPROACH_FEED_MM_MIN`.
 
+Retract the pointer back to the configured safe Y plane after inspecting a target:
+
+```bash
+curl -X POST http://127.0.0.1:8000/robot/retract
+```
+
 Emergency stop:
 
 ```bash
