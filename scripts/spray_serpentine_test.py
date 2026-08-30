@@ -21,8 +21,8 @@ DEFAULT_SPRAY_SETTLE_MS = 150
 DEFAULT_RELEASE_SETTLE_MS = 100
 DEFAULT_SERVO_GPIO_PIN = 18
 DEFAULT_SERVO_FREQUENCY_HZ = 50
-MIN_SAFE_SERVO_PULSE_US = 400
-MAX_SAFE_SERVO_PULSE_US = 2600
+MIN_SAFE_SERVO_PULSE_US = 500
+MAX_SAFE_SERVO_PULSE_US = 2500
 
 
 class SprayTestError(RuntimeError):
@@ -30,10 +30,11 @@ class SprayTestError(RuntimeError):
 
 
 class DirectGPIOServo:
-    """Direct Raspberry Pi GPIO servo output using lgpio.
+    """Direct Raspberry Pi BCM GPIO servo output via gpiozero.
 
-    Pulse widths are explicit so the test never guesses trigger geometry.
-    The GPIO PWM signal is independent of Klipper/Moonraker.
+    gpiozero handles the Raspberry Pi model-specific gpiochip mapping,
+    while pulse widths remain explicit so the test never guesses trigger
+    geometry.
     """
 
     def __init__(
@@ -54,22 +55,25 @@ class DirectGPIOServo:
             "release pulse",
         )
         self.frequency_hz = int(frequency_hz)
+
         if self.gpio_pin < 0:
             raise SprayTestError("GPIO pin must be non-negative.")
-        if self.frequency_hz <= 0:
-            raise SprayTestError("Servo frequency must be positive.")
+        if self.frequency_hz != 50:
+            raise SprayTestError(
+                "This test currently supports standard 50 Hz servo PWM only."
+            )
 
         try:
-            import lgpio  # type: ignore
+            from gpiozero import Servo  # type: ignore
         except ImportError as exc:
             raise SprayTestError(
-                "Direct GPIO servo control requires the Python lgpio package. "
-                "On Raspberry Pi OS install it in the active environment "
-                "(for example: pip install lgpio) and rerun the test."
+                "Direct GPIO servo control requires gpiozero. "
+                "Install the project requirements in the active virtual "
+                "environment and rerun the test."
             ) from exc
 
-        self._lgpio = lgpio
-        self._chip = None
+        self._Servo = Servo
+        self._servo = None
 
     @staticmethod
     def _validated_pulse(value: int, name: str) -> int:
@@ -82,39 +86,39 @@ class DirectGPIOServo:
             )
         return pulse
 
+    @staticmethod
+    def _value_for_pulse(pulse_us: int) -> float:
+        span = MAX_SAFE_SERVO_PULSE_US - MIN_SAFE_SERVO_PULSE_US
+        normalized = (
+            (pulse_us - MIN_SAFE_SERVO_PULSE_US)
+            / span
+        )
+        return normalized * 2.0 - 1.0
+
     def open(self) -> None:
-        if self._chip is not None:
+        if self._servo is not None:
             return
 
-        chip = self._lgpio.gpiochip_open(0)
         try:
-            self._lgpio.gpio_claim_output(
-                chip,
+            self._servo = self._Servo(
                 self.gpio_pin,
-                0,
+                min_pulse_width=MIN_SAFE_SERVO_PULSE_US / 1_000_000.0,
+                max_pulse_width=MAX_SAFE_SERVO_PULSE_US / 1_000_000.0,
+                frame_width=1.0 / self.frequency_hz,
+                initial_value=None,
             )
-            self._chip = chip
             self.release()
-        except Exception:
-            self._lgpio.gpiochip_close(chip)
-            raise
+        except Exception as exc:
+            self._servo = None
+            raise SprayTestError(
+                f"Could not open BCM GPIO{self.gpio_pin} for servo PWM: {exc}"
+            ) from exc
 
     def _set_pulse(self, pulse_us: int) -> None:
-        if self._chip is None:
+        if self._servo is None:
             raise SprayTestError("GPIO servo is not open.")
 
-        result_code = self._lgpio.tx_servo(
-            self._chip,
-            self.gpio_pin,
-            int(pulse_us),
-            self.frequency_hz,
-        )
-        if result_code < 0:
-            raise SprayTestError(
-                "lgpio rejected the servo pulse "
-                f"{pulse_us} us on GPIO{self.gpio_pin} "
-                f"(code {result_code})."
-            )
+        self._servo.value = self._value_for_pulse(pulse_us)
 
     def spray(self) -> None:
         self._set_pulse(self.spray_pulse_us)
@@ -123,31 +127,20 @@ class DirectGPIOServo:
         self._set_pulse(self.release_pulse_us)
 
     def close(self) -> None:
-        if self._chip is None:
+        if self._servo is None:
             return
 
-        chip = self._chip
-        self._chip = None
+        servo = self._servo
+        self._servo = None
 
         try:
-            # Leave enough time for the airbrush trigger to mechanically
-            # return before removing the PWM signal.
-            self._lgpio.tx_servo(
-                chip,
-                self.gpio_pin,
-                self.release_pulse_us,
-                self.frequency_hz,
+            servo.value = self._value_for_pulse(
+                self.release_pulse_us
             )
             time.sleep(0.25)
-            self._lgpio.tx_servo(
-                chip,
-                self.gpio_pin,
-                0,
-                self.frequency_hz,
-            )
-            self._lgpio.gpio_free(chip, self.gpio_pin)
+            servo.detach()
         finally:
-            self._lgpio.gpiochip_close(chip)
+            servo.close()
 
     def __enter__(self) -> "DirectGPIOServo":
         self.open()
@@ -677,7 +670,7 @@ def main() -> int:
         print(f"Servo GPIO (BCM): {args.servo_gpio}")
         print(f"Spray pulse: {args.spray_pulse_us} us")
         print(f"Release pulse: {args.release_pulse_us} us")
-        print("Servo control: direct Raspberry Pi GPIO via lgpio")
+        print("Servo control: direct Raspberry Pi BCM GPIO via gpiozero")
         print("Y motion: NONE")
         print("Solenoid control: NONE")
 
