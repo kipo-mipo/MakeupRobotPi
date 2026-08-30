@@ -6,3 +6,4 @@ pyorbbecsdk2
 mediapipe==0.10.18; platform_machine == "aarch64"
 mediapipe==0.10.35; platform_machine != "aarch64"
 lgpio; platform_system == "Linux" and (platform_machine == "aarch64" or platform_machine == "armv7l")
+gpiozero; platform_system == "Linux" and (platform_machine == "aarch64" or platform_machine == "armv7l")
