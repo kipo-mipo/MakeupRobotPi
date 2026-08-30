@@ -270,7 +270,7 @@ For the angled-plane mannequin experiment, `scripts/spray_serpentine_test.py` ru
 - no Y-axis commands
 - no solenoid commands
 
-Klipper/Moonraker controls only X/Z motion. The airbrush trigger servo is driven directly from the Pi using 50 Hz PWM through `lgpio`.
+Klipper/Moonraker controls only X/Z motion. The airbrush trigger servo is driven directly from the Pi using 50 Hz PWM through `gpiozero` using the modern `lgpio` backend where available.
 
 Install/update dependencies in the active virtual environment after pulling:
 
