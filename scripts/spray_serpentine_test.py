@@ -6,6 +6,7 @@ import json
 import math
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -18,10 +19,135 @@ DEFAULT_SPRAY_SPEED_MM_S = 15.0
 DEFAULT_TRAVEL_SPEED_MM_S = 40.0
 DEFAULT_SPRAY_SETTLE_MS = 150
 DEFAULT_RELEASE_SETTLE_MS = 100
+DEFAULT_SERVO_GPIO_PIN = 18
+DEFAULT_SERVO_FREQUENCY_HZ = 50
+MIN_SAFE_SERVO_PULSE_US = 500
+MAX_SAFE_SERVO_PULSE_US = 2500
 
 
 class SprayTestError(RuntimeError):
     pass
+
+
+class DirectGPIOServo:
+    """Direct Raspberry Pi BCM GPIO servo output via gpiozero.
+
+    gpiozero handles the Raspberry Pi model-specific gpiochip mapping,
+    while pulse widths remain explicit so the test never guesses trigger
+    geometry.
+    """
+
+    def __init__(
+        self,
+        *,
+        gpio_pin: int,
+        spray_pulse_us: int,
+        release_pulse_us: int,
+        frequency_hz: int = DEFAULT_SERVO_FREQUENCY_HZ,
+    ) -> None:
+        self.gpio_pin = int(gpio_pin)
+        self.spray_pulse_us = self._validated_pulse(
+            spray_pulse_us,
+            "spray pulse",
+        )
+        self.release_pulse_us = self._validated_pulse(
+            release_pulse_us,
+            "release pulse",
+        )
+        self.frequency_hz = int(frequency_hz)
+
+        if self.gpio_pin < 0:
+            raise SprayTestError("GPIO pin must be non-negative.")
+        if self.frequency_hz != 50:
+            raise SprayTestError(
+                "This test currently supports standard 50 Hz servo PWM only."
+            )
+
+        try:
+            from gpiozero import Servo  # type: ignore
+        except ImportError as exc:
+            raise SprayTestError(
+                "Direct GPIO servo control requires gpiozero. "
+                "Install the project requirements in the active virtual "
+                "environment and rerun the test."
+            ) from exc
+
+        self._Servo = Servo
+        self._servo = None
+
+    @staticmethod
+    def _validated_pulse(value: int, name: str) -> int:
+        pulse = int(value)
+        if not MIN_SAFE_SERVO_PULSE_US <= pulse <= MAX_SAFE_SERVO_PULSE_US:
+            raise SprayTestError(
+                f"{name} must be between "
+                f"{MIN_SAFE_SERVO_PULSE_US} and "
+                f"{MAX_SAFE_SERVO_PULSE_US} microseconds."
+            )
+        return pulse
+
+    @staticmethod
+    def _value_for_pulse(pulse_us: int) -> float:
+        span = MAX_SAFE_SERVO_PULSE_US - MIN_SAFE_SERVO_PULSE_US
+        normalized = (
+            (pulse_us - MIN_SAFE_SERVO_PULSE_US)
+            / span
+        )
+        return normalized * 2.0 - 1.0
+
+    def open(self) -> None:
+        if self._servo is not None:
+            return
+
+        try:
+            self._servo = self._Servo(
+                self.gpio_pin,
+                min_pulse_width=MIN_SAFE_SERVO_PULSE_US / 1_000_000.0,
+                max_pulse_width=MAX_SAFE_SERVO_PULSE_US / 1_000_000.0,
+                frame_width=1.0 / self.frequency_hz,
+                initial_value=None,
+            )
+            self.release()
+        except Exception as exc:
+            self._servo = None
+            raise SprayTestError(
+                f"Could not open BCM GPIO{self.gpio_pin} for servo PWM: {exc}"
+            ) from exc
+
+    def _set_pulse(self, pulse_us: int) -> None:
+        if self._servo is None:
+            raise SprayTestError("GPIO servo is not open.")
+
+        self._servo.value = self._value_for_pulse(pulse_us)
+
+    def spray(self) -> None:
+        self._set_pulse(self.spray_pulse_us)
+
+    def release(self) -> None:
+        self._set_pulse(self.release_pulse_us)
+
+    def close(self) -> None:
+        if self._servo is None:
+            return
+
+        servo = self._servo
+        self._servo = None
+
+        try:
+            servo.value = self._value_for_pulse(
+                self.release_pulse_us
+            )
+            time.sleep(0.25)
+            servo.detach()
+        finally:
+            servo.close()
+
+    def __enter__(self) -> "DirectGPIOServo":
+        self.open()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
 
 @dataclass(frozen=True)
@@ -255,41 +381,6 @@ def validate_status_and_bounds(
                 )
 
 
-def resolve_spray_commands(args: argparse.Namespace) -> tuple[str, str]:
-    on_command = (
-        args.spray_on_gcode
-        or os.getenv("MAKEUP_SPRAY_ON_GCODE")
-    )
-    off_command = (
-        args.spray_off_gcode
-        or os.getenv("MAKEUP_SPRAY_OFF_GCODE")
-    )
-
-    if on_command and off_command:
-        return on_command.strip(), off_command.strip()
-
-    if (
-        args.servo_name
-        and args.spray_angle is not None
-        and args.release_angle is not None
-    ):
-        return (
-            "SET_SERVO "
-            f"SERVO={args.servo_name} "
-            f"ANGLE={args.spray_angle:g}",
-            "SET_SERVO "
-            f"SERVO={args.servo_name} "
-            f"ANGLE={args.release_angle:g}",
-        )
-
-    raise SprayTestError(
-        "Provide spray servo commands using either "
-        "--spray-on-gcode/--spray-off-gcode, "
-        "MAKEUP_SPRAY_ON_GCODE/MAKEUP_SPRAY_OFF_GCODE, "
-        "or --servo-name plus --spray-angle and --release-angle."
-    )
-
-
 def send_gcode(
     commands: list[str],
     *,
@@ -318,8 +409,9 @@ def build_preview(
     passes: list[SprayPass],
     spray_speed_mm_s: float,
     travel_speed_mm_s: float,
-    spray_on_gcode: str,
-    spray_off_gcode: str,
+    servo_gpio_pin: int,
+    spray_pulse_us: int,
+    release_pulse_us: int,
     spray_settle_ms: int,
     release_settle_ms: int,
 ) -> list[str]:
@@ -338,7 +430,7 @@ def build_preview(
     commands = [
         "M400",
         "G90",
-        spray_off_gcode,
+        f"; GPIO{servo_gpio_pin} release pulse {release_pulse_us} us",
         f"G0 X{passes[0].x_mm:.3f} "
         f"Z{passes[0].z_start_mm:.3f} "
         f"F{travel_feed:.0f}",
@@ -348,13 +440,13 @@ def build_preview(
     for index, spray_pass in enumerate(passes):
         commands.extend(
             [
-                spray_on_gcode,
-                f"G4 P{spray_settle_ms}",
+                f"; GPIO{servo_gpio_pin} spray pulse {spray_pulse_us} us",
+                f"; wait {spray_settle_ms} ms for servo",
                 f"G1 Z{spray_pass.z_end_mm:.3f} "
                 f"F{spray_feed:.0f}",
                 "M400",
-                spray_off_gcode,
-                f"G4 P{release_settle_ms}",
+                f"; GPIO{servo_gpio_pin} release pulse {release_pulse_us} us",
+                f"; wait {release_settle_ms} ms before X travel",
             ]
         )
 
@@ -368,7 +460,12 @@ def build_preview(
                 ]
             )
 
-    commands.extend([spray_off_gcode, "M400"])
+    commands.extend(
+        [
+            f"; GPIO{servo_gpio_pin} release pulse {release_pulse_us} us",
+            "M400",
+        ]
+    )
     return commands
 
 
@@ -377,8 +474,7 @@ def execute_pattern(
     passes: list[SprayPass],
     spray_speed_mm_s: float,
     travel_speed_mm_s: float,
-    spray_on_gcode: str,
-    spray_off_gcode: str,
+    servo: DirectGPIOServo,
     spray_settle_ms: int,
     release_settle_ms: int,
 ) -> None:
@@ -396,7 +492,6 @@ def execute_pattern(
             [
                 "M400",
                 "G90",
-                spray_off_gcode,
                 f"G0 X{passes[0].x_mm:.3f} "
                 f"Z{passes[0].z_start_mm:.3f} "
                 f"F{travel_feed:.0f}",
@@ -412,18 +507,20 @@ def execute_pattern(
                 f"→ {spray_pass.z_end_mm:.2f} mm"
             )
 
+            servo.spray()
+            time.sleep(spray_settle_ms / 1000.0)
+
             send_gcode(
                 [
-                    spray_on_gcode,
-                    f"G4 P{spray_settle_ms}",
                     f"G1 Z{spray_pass.z_end_mm:.3f} "
                     f"F{spray_feed:.0f}",
                     "M400",
-                    spray_off_gcode,
-                    f"G4 P{release_settle_ms}",
                 ],
                 timeout_seconds=120.0,
             )
+
+            servo.release()
+            time.sleep(release_settle_ms / 1000.0)
 
             if index + 1 < len(passes):
                 next_pass = passes[index + 1]
@@ -436,13 +533,11 @@ def execute_pattern(
                 )
     finally:
         try:
-            send_gcode(
-                [spray_off_gcode, "M400"],
-                timeout_seconds=10.0,
-            )
+            servo.release()
+            time.sleep(max(release_settle_ms, 100) / 1000.0)
         except Exception as exc:
             print(
-                "WARNING: failed to send final spray-off command: "
+                "WARNING: failed to send final GPIO servo release: "
                 f"{exc}",
                 file=sys.stderr,
             )
@@ -493,33 +588,28 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--spray-on-gcode",
+        "--servo-gpio",
+        type=int,
+        default=DEFAULT_SERVO_GPIO_PIN,
+        help="BCM GPIO pin driving the airbrush servo. Default: 18.",
+    )
+    parser.add_argument(
+        "--spray-pulse-us",
+        type=int,
+        required=True,
         help=(
-            "Exact Klipper G-code that presses/opens the airbrush "
-            "servo. Can also use MAKEUP_SPRAY_ON_GCODE."
+            "Known-safe servo pulse width in microseconds that "
+            "presses the airbrush trigger."
         ),
     )
     parser.add_argument(
-        "--spray-off-gcode",
+        "--release-pulse-us",
+        type=int,
+        required=True,
         help=(
-            "Exact Klipper G-code that releases/closes the airbrush "
-            "servo. Can also use MAKEUP_SPRAY_OFF_GCODE."
+            "Known-safe servo pulse width in microseconds that "
+            "releases the airbrush trigger."
         ),
-    )
-
-    parser.add_argument(
-        "--servo-name",
-        help="Klipper [servo] name for SET_SERVO convenience mode.",
-    )
-    parser.add_argument(
-        "--spray-angle",
-        type=float,
-        help="Servo angle that presses the spray trigger.",
-    )
-    parser.add_argument(
-        "--release-angle",
-        type=float,
-        help="Servo angle that releases the spray trigger.",
     )
 
     parser.add_argument(
@@ -538,7 +628,15 @@ def main() -> int:
     args = parse_args()
 
     try:
-        spray_on, spray_off = resolve_spray_commands(args)
+        DirectGPIOServo._validated_pulse(
+            args.spray_pulse_us,
+            "spray pulse",
+        )
+        DirectGPIOServo._validated_pulse(
+            args.release_pulse_us,
+            "release pulse",
+        )
+
         passes = build_serpentine_passes(
             x_start_mm=args.x_start,
             x_end_mm=args.x_end,
@@ -557,8 +655,9 @@ def main() -> int:
             passes=passes,
             spray_speed_mm_s=args.spray_speed,
             travel_speed_mm_s=args.travel_speed,
-            spray_on_gcode=spray_on,
-            spray_off_gcode=spray_off,
+            servo_gpio_pin=args.servo_gpio,
+            spray_pulse_us=args.spray_pulse_us,
+            release_pulse_us=args.release_pulse_us,
             spray_settle_ms=args.spray_settle_ms,
             release_settle_ms=args.release_settle_ms,
         )
@@ -568,8 +667,10 @@ def main() -> int:
         print(f"Vertical passes: {len(passes)}")
         print(f"Actual X step-over: {actual_step:.2f} mm")
         print(f"Vertical spray speed: {args.spray_speed:.2f} mm/s")
-        print(f"Spray-on command: {spray_on}")
-        print(f"Spray-off command: {spray_off}")
+        print(f"Servo GPIO (BCM): {args.servo_gpio}")
+        print(f"Spray pulse: {args.spray_pulse_us} us")
+        print(f"Release pulse: {args.release_pulse_us} us")
+        print("Servo control: direct Raspberry Pi BCM GPIO via gpiozero")
         print("Y motion: NONE")
         print("Solenoid control: NONE")
 
@@ -592,17 +693,21 @@ def main() -> int:
         status = printer_status()
         validate_status_and_bounds(status, passes)
 
-        print("\nEXECUTING on mannequin. Ctrl-C requests spray-off in cleanup.")
-        execute_pattern(
-            passes=passes,
-            spray_speed_mm_s=args.spray_speed,
-            travel_speed_mm_s=args.travel_speed,
-            spray_on_gcode=spray_on,
-            spray_off_gcode=spray_off,
-            spray_settle_ms=args.spray_settle_ms,
-            release_settle_ms=args.release_settle_ms,
-        )
-        print("Pattern complete; spray servo released.")
+        print("\nEXECUTING on mannequin. Ctrl-C requests GPIO18 servo release.")
+        with DirectGPIOServo(
+            gpio_pin=args.servo_gpio,
+            spray_pulse_us=args.spray_pulse_us,
+            release_pulse_us=args.release_pulse_us,
+        ) as servo:
+            execute_pattern(
+                passes=passes,
+                spray_speed_mm_s=args.spray_speed,
+                travel_speed_mm_s=args.travel_speed,
+                servo=servo,
+                spray_settle_ms=args.spray_settle_ms,
+                release_settle_ms=args.release_settle_ms,
+            )
+        print("Pattern complete; GPIO spray servo released.")
         return 0
 
     except (SprayTestError, KeyboardInterrupt) as exc:

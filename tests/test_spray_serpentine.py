@@ -61,8 +61,9 @@ class SerpentineSprayTestTests(unittest.TestCase):
             passes=passes,
             spray_speed_mm_s=15.0,
             travel_speed_mm_s=40.0,
-            spray_on_gcode="SPRAY_ON",
-            spray_off_gcode="SPRAY_OFF",
+            servo_gpio_pin=18,
+            spray_pulse_us=1800,
+            release_pulse_us=1100,
             spray_settle_ms=150,
             release_settle_ms=100,
         )
@@ -78,7 +79,7 @@ class SerpentineSprayTestTests(unittest.TestCase):
             all(" Y" not in command for command in movement_commands)
         )
 
-    def test_spray_is_off_before_each_x_reposition(self) -> None:
+    def test_preview_releases_gpio_servo_before_each_x_reposition(self) -> None:
         passes = build_serpentine_passes(
             x_start_mm=20.0,
             x_end_mm=38.0,
@@ -90,15 +91,21 @@ class SerpentineSprayTestTests(unittest.TestCase):
             passes=passes,
             spray_speed_mm_s=15.0,
             travel_speed_mm_s=40.0,
-            spray_on_gcode="SPRAY_ON",
-            spray_off_gcode="SPRAY_OFF",
+            servo_gpio_pin=18,
+            spray_pulse_us=1800,
+            release_pulse_us=1100,
             spray_settle_ms=150,
             release_settle_ms=100,
         )
 
         for index, command in enumerate(commands):
             if command.startswith("G0 X") and " Z" not in command:
-                self.assertIn("SPRAY_OFF", commands[:index])
+                self.assertTrue(
+                    any(
+                        "GPIO18 release pulse 1100 us" in earlier
+                        for earlier in commands[:index]
+                    )
+                )
 
     def test_invalid_z_range_is_rejected(self) -> None:
         with self.assertRaises(SprayTestError):
