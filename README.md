@@ -264,16 +264,44 @@ For the angled-plane mannequin experiment, `scripts/spray_serpentine_test.py` ru
 
 - continuous vertical spray passes
 - alternating up/down direction
+- direct Raspberry Pi servo control on BCM GPIO18 by default
 - spray servo released during each X reposition
 - approximately 9 mm X step-over by default
 - no Y-axis commands
 - no solenoid commands
 
-The physical plane/mannequin angle is set mechanically; the script does not command or compensate a 23° angle.
+Klipper/Moonraker controls only X/Z motion. The airbrush trigger servo is driven directly from the Pi using 50 Hz PWM through `lgpio`.
+
+Install/update dependencies in the active virtual environment after pulling:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+The script deliberately does **not** guess servo positions. Supply the known-safe PWM pulse widths that correspond to the existing trigger-pressed and trigger-released positions.
+
+Before combining servo and robot motion, test GPIO18 by itself:
+
+```bash
+python scripts/test_gpio18_servo.py \
+  --spray-pulse-us YOUR_KNOWN_SPRAY_PULSE \
+  --release-pulse-us YOUR_KNOWN_RELEASE_PULSE
+```
+
+That diagnostic sends no Klipper motion and no solenoid command. It commands release → spray for one second → release.
+
+If your old servo code used 50 Hz duty cycle rather than microseconds, convert it with:
+
+```text
+pulse_us = duty_percent * 200
+```
+
+For example, a 7.5% duty cycle at 50 Hz is 1500 microseconds. Use only values already known to be safe for the installed linkage.
 
 The default vertical spray speed is **15 mm/s (900 mm/min)**. With the measured roughly 17–20 mm spray diameter and 9 mm step-over, this is a useful first coat test with roughly 47–55% lateral overlap. If the coat is too light, try 10–12 mm/s. If it is too heavy/wet, try 20–25 mm/s.
 
-The script does not assume a servo name or trigger angle. Supply the exact servo commands already used by the robot. For example, if Klipper has a `[servo airbrush]` and the known trigger/release angles are 80° and 20°:
+Preview a pattern:
 
 ```bash
 python scripts/spray_serpentine_test.py \
@@ -283,14 +311,13 @@ python scripts/spray_serpentine_test.py \
   --z-max 210 \
   --step-over 9 \
   --spray-speed 15 \
-  --servo-name airbrush \
-  --spray-angle 80 \
-  --release-angle 20
+  --spray-pulse-us YOUR_KNOWN_SPRAY_PULSE \
+  --release-pulse-us YOUR_KNOWN_RELEASE_PULSE
 ```
 
-That command is **preview only**. It prints every pass and the generated G-code without moving the robot or actuating the servo.
+That is preview-only. It prints every pass and the direct-GPIO servo events without moving the robot or actuating the servo.
 
-After verifying the X/Z bounds, add `--execute`:
+After checking the bounds, add `--execute`:
 
 ```bash
 python scripts/spray_serpentine_test.py \
@@ -300,23 +327,12 @@ python scripts/spray_serpentine_test.py \
   --z-max 210 \
   --step-over 9 \
   --spray-speed 15 \
-  --servo-name airbrush \
-  --spray-angle 80 \
-  --release-angle 20 \
+  --spray-pulse-us YOUR_KNOWN_SPRAY_PULSE \
+  --release-pulse-us YOUR_KNOWN_RELEASE_PULSE \
   --execute
 ```
 
-If the existing spray servo is controlled by custom Klipper macros or other G-code, provide those exact commands instead:
-
-```bash
-python scripts/spray_serpentine_test.py \
-  --x-start 60 --x-end 120 \
-  --z-min 50 --z-max 210 \
-  --spray-on-gcode 'YOUR_EXISTING_SPRAY_ON_COMMAND' \
-  --spray-off-gcode 'YOUR_EXISTING_SPRAY_OFF_COMMAND'
-```
-
-The commands may also be stored in `MAKEUP_SPRAY_ON_GCODE` and `MAKEUP_SPRAY_OFF_GCODE`.
+Use `--servo-gpio N` only if the servo signal is moved away from BCM GPIO18.
 
 The script distributes X positions evenly so the final strip never becomes an unusually narrow high-overlap strip. For example, a requested maximum 9 mm step-over may become 8.6 mm when that divides the requested X span more evenly.
 
