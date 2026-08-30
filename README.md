@@ -258,6 +258,76 @@ curl -X POST http://127.0.0.1:8000/robot/emergency-stop
 
 The point tester assumes the Robot X/Y/Z values used during calibration are the same Klipper X/Y/Z coordinates in millimeters.
 
+## 23° half-face serpentine spray test
+
+For the angled-plane mannequin experiment, `scripts/spray_serpentine_test.py` runs a lawn-mower-style X/Z pattern:
+
+- continuous vertical spray passes
+- alternating up/down direction
+- spray servo released during each X reposition
+- approximately 9 mm X step-over by default
+- no Y-axis commands
+- no solenoid commands
+
+The physical plane/mannequin angle is set mechanically; the script does not command or compensate a 23° angle.
+
+The default vertical spray speed is **15 mm/s (900 mm/min)**. With the measured roughly 17–20 mm spray diameter and 9 mm step-over, this is a useful first coat test with roughly 47–55% lateral overlap. If the coat is too light, try 10–12 mm/s. If it is too heavy/wet, try 20–25 mm/s.
+
+The script does not assume a servo name or trigger angle. Supply the exact servo commands already used by the robot. For example, if Klipper has a `[servo airbrush]` and the known trigger/release angles are 80° and 20°:
+
+```bash
+python scripts/spray_serpentine_test.py \
+  --x-start 60 \
+  --x-end 120 \
+  --z-min 50 \
+  --z-max 210 \
+  --step-over 9 \
+  --spray-speed 15 \
+  --servo-name airbrush \
+  --spray-angle 80 \
+  --release-angle 20
+```
+
+That command is **preview only**. It prints every pass and the generated G-code without moving the robot or actuating the servo.
+
+After verifying the X/Z bounds, add `--execute`:
+
+```bash
+python scripts/spray_serpentine_test.py \
+  --x-start 60 \
+  --x-end 120 \
+  --z-min 50 \
+  --z-max 210 \
+  --step-over 9 \
+  --spray-speed 15 \
+  --servo-name airbrush \
+  --spray-angle 80 \
+  --release-angle 20 \
+  --execute
+```
+
+If the existing spray servo is controlled by custom Klipper macros or other G-code, provide those exact commands instead:
+
+```bash
+python scripts/spray_serpentine_test.py \
+  --x-start 60 --x-end 120 \
+  --z-min 50 --z-max 210 \
+  --spray-on-gcode 'YOUR_EXISTING_SPRAY_ON_COMMAND' \
+  --spray-off-gcode 'YOUR_EXISTING_SPRAY_OFF_COMMAND'
+```
+
+The commands may also be stored in `MAKEUP_SPRAY_ON_GCODE` and `MAKEUP_SPRAY_OFF_GCODE`.
+
+The script distributes X positions evenly so the final strip never becomes an unusually narrow high-overlap strip. For example, a requested maximum 9 mm step-over may become 8.6 mm when that divides the requested X span more evenly.
+
+Run the planning tests with:
+
+```bash
+python -m unittest discover -s tests -p 'test_spray_serpentine.py'
+```
+
+For the first physical coat, use a paper-covered mannequin only. If possible, let the paper extend beyond the desired coated region in Z so acceleration/deceleration occurs outside the area being judged; otherwise endpoint regions can receive a little more material than the middle of each pass.
+
 ### Validation before robot motion
 
 1. Confirm `/camera/status` reports the Gemini ready.
