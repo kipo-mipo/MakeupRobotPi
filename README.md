@@ -62,7 +62,7 @@ Then run `shared/setup_env.py` from that directory with the permissions it reque
 python main.py
 ```
 
-The MediaPipe rigid-calibration API reports version `0.8.0`.
+The MakeupRobot Pi API reports version `0.9.0`.
 
 ### Check camera discovery
 
@@ -343,6 +343,14 @@ Results are saved to:
 ```text
 config/aruco_robot_validation_latest.json
 ```
+
+The iPhone app can retrieve the currently validated automatic calibration with:
+
+```bash
+curl http://127.0.0.1:8000/calibration/automatic
+```
+
+The response includes both the automatic ArUco calibration and its independent validation plus a `ready_for_targeting` flag. That flag is true only when both quality gates pass, the validation belongs to the current calibration, the camera serials agree, and the rigid transform has valid dimensions.
 
 
 ## 23° half-face serpentine spray test
