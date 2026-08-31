@@ -100,6 +100,27 @@ def main() -> int:
             x_count=args.x_count,
             z_count=args.z_count,
         )
+        numeric_checks = {
+            "marker size": args.marker_size_mm,
+            "travel speed": args.travel_speed,
+            "settle seconds": args.settle_seconds,
+            "maximum plane RMS": args.max_plane_rms_mm,
+            "acceptable error": args.acceptable_error_mm,
+            "Robot Y": args.robot_y,
+        }
+        for name, value in numeric_checks.items():
+            if not np.isfinite(float(value)):
+                raise ArucoCalibrationError(f"{name} must be finite.")
+        if args.marker_size_mm <= 0:
+            raise ArucoCalibrationError("Marker size must be positive.")
+        if args.travel_speed <= 0:
+            raise ArucoCalibrationError("Travel speed must be positive.")
+        if args.settle_seconds < 0:
+            raise ArucoCalibrationError("Settle seconds cannot be negative.")
+        if args.max_plane_rms_mm <= 0 or args.acceptable_error_mm <= 0:
+            raise ArucoCalibrationError("Plane RMS and acceptable-error limits must be positive.")
+        if not 0 <= args.depth_radius_px <= 10:
+            raise ArucoCalibrationError("Depth radius must be between 0 and 10 pixels.")
 
         print("\nGemini ↔ robot ArUco calibration")
         print("---------------------------------")
