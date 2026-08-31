@@ -8,6 +8,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from automatic_calibration import (
+    AutomaticCalibrationError,
+    read_automatic_calibration_bundle,
+)
 from calibration_depth import CalibrationDepthError, sample_capture_depth
 from camera_geometry import CameraGeometryError, read_active_camera_geometry
 from gemini_camera import (
@@ -41,11 +45,13 @@ from robot_motion import (
 
 app = FastAPI(
     title="MakeupRobot Pi API",
-    version="0.8.0",
+    version="0.9.0",
 )
 
 CONFIG_DIR = Path(__file__).resolve().parent / "config"
 ACTIVE_CALIBRATION_PATH = CONFIG_DIR / "gemini_robot_calibration.json"
+AUTOMATIC_CALIBRATION_PATH = CONFIG_DIR / "aruco_robot_calibration_latest.json"
+AUTOMATIC_VALIDATION_PATH = CONFIG_DIR / "aruco_robot_validation_latest.json"
 
 
 class TestMessage(BaseModel):
@@ -197,6 +203,17 @@ def create_depth_samples(data: DepthSampleRequest):
         )
     except CalibrationDepthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/calibration/automatic")
+def get_automatic_calibration():
+    try:
+        return read_automatic_calibration_bundle(
+            calibration_path=AUTOMATIC_CALIBRATION_PATH,
+            validation_path=AUTOMATIC_VALIDATION_PATH,
+        )
+    except AutomaticCalibrationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/calibration/profile")
