@@ -84,7 +84,7 @@ class ArucoRobotCalibrationTests(unittest.TestCase):
         self.assertLess(float(np.max(leave_one_out_errors(camera, robot))), 1e-8)
 
 
-    def test_rgb_pnp_recovers_marker_center_with_180_display_rotation(self) -> None:
+    def test_rgb_pnp_recovers_marker_center_from_native_rgb_corners(self) -> None:
         import cv2
 
         width = 1920
@@ -144,20 +144,13 @@ class ArucoRobotCalibrationTests(unittest.TestCase):
             coefficients,
         )
         raw = raw.reshape(4, 2)
-        display = np.column_stack(
-            [
-                (width - 1) - raw[:, 0],
-                (height - 1) - raw[:, 1],
-            ]
-        )
 
         recovered, diagnostics = estimate_marker_center_camera_xyz_pnp(
-            display,
+            raw,
             marker_size_mm=30.0,
             geometry=geometry,
             width=width,
             height=height,
-            rotation_degrees=180,
         )
         np.testing.assert_allclose(recovered, expected_center, atol=1e-5)
         self.assertLess(diagnostics["reprojection_rms_px"], 1e-5)
