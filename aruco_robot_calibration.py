@@ -16,9 +16,8 @@ from camera_geometry import CameraGeometryError, read_active_camera_geometry
 from gemini_camera import CAPTURE_DIR, CameraCaptureError, CameraUnavailableError, capture_calibration
 from gemini_orientation import (
     GeminiOrientationError,
-    capture_display_rotation,
-    display_to_raw_pixel,
     prepare_capture_display,
+    raw_to_display_pixel,
 )
 from robot_motion import RobotMotionUnavailable, _request_json, _result
 
@@ -329,32 +328,18 @@ def _scaled_rgb_camera_model(
 
 
 def estimate_marker_center_camera_xyz_pnp(
-    corners_display_px: np.ndarray,
+    corners_raw_px: np.ndarray,
     *,
     marker_size_mm: float,
     geometry: dict[str, Any],
     width: int,
     height: int,
-    rotation_degrees: int,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     size = _finite(marker_size_mm, "marker size")
     if size <= 0:
         raise ArucoCalibrationError("Marker size must be positive for RGB pose estimation.")
 
-    corners_display = np.asarray(corners_display_px, dtype=np.float64).reshape(4, 2)
-    raw_corners = np.asarray(
-        [
-            display_to_raw_pixel(
-                float(point[0]),
-                float(point[1]),
-                width=width,
-                height=height,
-                rotation_degrees=rotation_degrees,
-            )
-            for point in corners_display
-        ],
-        dtype=np.float64,
-    )
+    raw_corners = np.asarray(corners_raw_px, dtype=np.float64).reshape(4, 2)
     camera_matrix, coefficients = _scaled_rgb_camera_model(
         geometry,
         width=width,
@@ -517,22 +502,35 @@ def capture_marker_point(
         metadata_filename=capture.metadata_filename,
     )
     _inject_geometry(capture.metadata_filename, active_geometry)
-    display_path = CAPTURE_DIR / display["display_color_filename"]
-    image = cv2.imread(str(display_path), cv2.IMREAD_COLOR)
-    if image is None:
-        raise ArucoCalibrationError("Could not decode the upright Gemini RGB capture.")
-    corners = detect_marker_corners(image, marker_id)
+    raw_path = CAPTURE_DIR / Path(capture.color_filename).name
+    raw_image = cv2.imread(str(raw_path), cv2.IMREAD_COLOR)
+    if raw_image is None:
+        raise ArucoCalibrationError("Could not decode the native Gemini RGB capture.")
+    raw_corners = detect_marker_corners(raw_image, marker_id)
 
     metadata_path = CAPTURE_DIR / Path(capture.metadata_filename).name
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    rotation_degrees = capture_display_rotation(metadata)
+    rotation_degrees = int(metadata.get("display", {}).get("rotation_degrees", 0))
+    display_corners = np.asarray(
+        [
+            raw_to_display_pixel(
+                float(point[0]),
+                float(point[1]),
+                width=capture.width,
+                height=capture.height,
+                rotation_degrees=rotation_degrees,
+            )
+            for point in raw_corners
+        ],
+        dtype=np.float64,
+    )
+
     pnp_xyz, pnp_diagnostics = estimate_marker_center_camera_xyz_pnp(
-        corners,
+        raw_corners,
         marker_size_mm=marker_size_mm,
         geometry=active_geometry,
         width=capture.width,
         height=capture.height,
-        rotation_degrees=rotation_degrees,
     )
 
     depth_xyz: np.ndarray | None = None
@@ -540,7 +538,7 @@ def capture_marker_point(
     try:
         depth_xyz, depth_details = estimate_marker_center_camera_xyz(
             capture.capture_id,
-            corners,
+            display_corners,
             depth_radius_px=depth_radius_px,
             max_plane_rms_mm=max_plane_rms_mm,
         )
@@ -567,7 +565,8 @@ def capture_marker_point(
         "display_filename": display["display_color_filename"],
         "camera_xyz_mm": camera_xyz.tolist(),
         "camera_xyz_method": position_method,
-        "marker_corners_display_px": corners.tolist(),
+        "marker_corners_raw_px": raw_corners.tolist(),
+        "marker_corners_display_px": display_corners.tolist(),
         "pnp_diagnostics": pnp_diagnostics,
         "depth_diagnostics": depth_diagnostics,
     }
