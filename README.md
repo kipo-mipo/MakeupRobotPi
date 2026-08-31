@@ -301,7 +301,7 @@ python scripts/calibrate_aruco_robot.py \
   --execute
 ```
 
-The script uses the four detected tag corners to sample a 3×3 set of interior aligned-depth points, fits the tag depth plane, intersects the tag-center camera ray with that plane, and pairs the resulting Gemini Camera XYZ with the known Robot coordinate of the marker center. The nominal 30 mm tag size is recorded for audit but is not used to scale the depth-derived camera point.
+The script detects the four tag corners and always computes a 30 mm square-marker RGB pose using the Gemini RGB intrinsics/distortion and OpenCV IPPE-square PnP. It also tries to sample a 3×3 set of interior aligned-depth points and fit the tag depth plane. When tag depth is valid, the depth-plane center is used and the RGB pose is kept as a cross-check. When the tag surface returns no usable depth, calibration automatically falls back to the RGB ArUco pose, so the accurately measured coded marker size becomes the metric scale for Camera XYZ.
 
 Results are written to:
 
