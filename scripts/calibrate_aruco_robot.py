@@ -138,15 +138,28 @@ def main() -> int:
         if args.check_marker:
             measured = capture_marker_point(
                 marker_id=args.marker_id,
+                marker_size_mm=args.marker_size_mm,
                 depth_radius_px=args.depth_radius_px,
                 max_plane_rms_mm=args.max_plane_rms_mm,
             )
             xyz = measured["camera_xyz_mm"]
-            diag = measured["depth_diagnostics"]
+            depth_diag = measured["depth_diagnostics"]
+            pnp_diag = measured["pnp_diagnostics"]
             print("\nMARKER CHECK PASS")
             print("Camera XYZ: " + ", ".join(f"{value:.2f}" for value in xyz) + " mm")
-            print(f"Valid tag depth samples: {diag['valid_depth_samples']}/9")
-            print(f"Tag depth-plane RMS: {diag['plane_rms_mm']:.3f} mm")
+            print(f"Position method: {measured['camera_xyz_method']}")
+            print(f"PnP reprojection RMS: {pnp_diag['reprojection_rms_px']:.3f} px")
+            print(f"PnP minimum marker side: {pnp_diag['minimum_marker_side_px']:.1f} px")
+            if depth_diag.get("available"):
+                print(f"Valid tag depth samples: {depth_diag['valid_depth_samples']}/9")
+                print(f"Tag depth-plane RMS: {depth_diag['plane_rms_mm']:.3f} mm")
+                print(
+                    "PnP vs depth center difference: "
+                    f"{depth_diag['pnp_vs_depth_center_difference_mm']:.3f} mm"
+                )
+            else:
+                print(f"Aligned depth unavailable on tag: {depth_diag.get('error', 'unknown')}")
+                print("RGB ArUco pose fallback is active, using the measured marker size.")
             print(f"Capture: {measured['capture_id']}")
             return 0
 

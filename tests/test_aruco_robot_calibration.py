@@ -6,6 +6,7 @@ from aruco_robot_calibration import (
     ArucoCalibrationError,
     build_grid,
     build_xz_move_commands,
+    estimate_marker_center_camera_xyz_pnp,
     fit_rigid_transform,
     leave_one_out_errors,
     marker_robot_coordinate,
@@ -81,6 +82,78 @@ class ArucoRobotCalibrationTests(unittest.TestCase):
         np.testing.assert_allclose(fit.translation, translation, atol=1e-10)
         self.assertLess(fit.rms_mm, 1e-9)
         self.assertLess(float(np.max(leave_one_out_errors(camera, robot))), 1e-8)
+
+
+    def test_rgb_pnp_recovers_marker_center_from_native_rgb_corners(self) -> None:
+        import cv2
+
+        width = 1920
+        height = 1080
+        geometry = {
+            "rgb_intrinsic": {
+                "fx": 1275.31298828125,
+                "fy": 1275.068603515625,
+                "cx": 961.7877197265625,
+                "cy": 549.299560546875,
+                "width": width,
+                "height": height,
+            },
+            "rgb_distortion": {
+                "k1": 0.1130407527089119,
+                "k2": -0.36739012598991394,
+                "p1": -0.00020846976258326322,
+                "p2": -0.0006828689365647733,
+                "k3": 0.2929854393005371,
+                "k4": 0.0,
+                "k5": 0.0,
+                "k6": 0.0,
+            },
+        }
+        camera_matrix = np.asarray(
+            [
+                [geometry["rgb_intrinsic"]["fx"], 0.0, geometry["rgb_intrinsic"]["cx"]],
+                [0.0, geometry["rgb_intrinsic"]["fy"], geometry["rgb_intrinsic"]["cy"]],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        coefficients = np.asarray(
+            [
+                geometry["rgb_distortion"][key]
+                for key in ("k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6")
+            ],
+            dtype=np.float64,
+        )
+        half = 15.0
+        object_points = np.asarray(
+            [
+                [-half, +half, 0.0],
+                [+half, +half, 0.0],
+                [+half, -half, 0.0],
+                [-half, -half, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        rvec = np.asarray([0.12, -0.08, 0.04], dtype=np.float64)
+        expected_center = np.asarray([18.0, -12.0, 310.0], dtype=np.float64)
+        raw, _ = cv2.projectPoints(
+            object_points,
+            rvec,
+            expected_center.reshape(3, 1),
+            camera_matrix,
+            coefficients,
+        )
+        raw = raw.reshape(4, 2)
+
+        recovered, diagnostics = estimate_marker_center_camera_xyz_pnp(
+            raw,
+            marker_size_mm=30.0,
+            geometry=geometry,
+            width=width,
+            height=height,
+        )
+        np.testing.assert_allclose(recovered, expected_center, atol=1e-5)
+        self.assertLess(diagnostics["reprojection_rms_px"], 1e-5)
 
     def test_rigid_fit_rejects_collinear_points(self) -> None:
         camera = np.asarray(

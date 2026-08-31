@@ -14,7 +14,11 @@ import numpy as np
 from calibration_depth import CalibrationDepthError, sample_capture_depth
 from camera_geometry import CameraGeometryError, read_active_camera_geometry
 from gemini_camera import CAPTURE_DIR, CameraCaptureError, CameraUnavailableError, capture_calibration
-from gemini_orientation import GeminiOrientationError, prepare_capture_display
+from gemini_orientation import (
+    GeminiOrientationError,
+    prepare_capture_display,
+    raw_to_display_pixel,
+)
 from robot_motion import RobotMotionUnavailable, _request_json, _result
 
 
@@ -276,6 +280,123 @@ def _quad_point(corners: np.ndarray, u: float, v: float) -> np.ndarray:
     )
 
 
+def _scaled_rgb_camera_model(
+    geometry: dict[str, Any],
+    *,
+    width: int,
+    height: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    try:
+        intrinsic = geometry["rgb_intrinsic"]
+        distortion = geometry.get("rgb_distortion", {})
+        intrinsic_width = float(intrinsic["width"])
+        intrinsic_height = float(intrinsic["height"])
+        scale_x = float(width) / intrinsic_width
+        scale_y = float(height) / intrinsic_height
+        camera_matrix = np.asarray(
+            [
+                [float(intrinsic["fx"]) * scale_x, 0.0, float(intrinsic["cx"]) * scale_x],
+                [0.0, float(intrinsic["fy"]) * scale_y, float(intrinsic["cy"]) * scale_y],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        coefficients = np.asarray(
+            [
+                float(distortion.get("k1", 0.0)),
+                float(distortion.get("k2", 0.0)),
+                float(distortion.get("p1", 0.0)),
+                float(distortion.get("p2", 0.0)),
+                float(distortion.get("k3", 0.0)),
+                float(distortion.get("k4", 0.0)),
+                float(distortion.get("k5", 0.0)),
+                float(distortion.get("k6", 0.0)),
+            ],
+            dtype=np.float64,
+        )
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+        raise ArucoCalibrationError("Gemini RGB camera geometry is incomplete for ArUco pose estimation.") from exc
+
+    if (
+        not np.all(np.isfinite(camera_matrix))
+        or not np.all(np.isfinite(coefficients))
+        or camera_matrix[0, 0] <= 0
+        or camera_matrix[1, 1] <= 0
+    ):
+        raise ArucoCalibrationError("Gemini RGB camera geometry is invalid for ArUco pose estimation.")
+    return camera_matrix, coefficients
+
+
+def estimate_marker_center_camera_xyz_pnp(
+    corners_raw_px: np.ndarray,
+    *,
+    marker_size_mm: float,
+    geometry: dict[str, Any],
+    width: int,
+    height: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    size = _finite(marker_size_mm, "marker size")
+    if size <= 0:
+        raise ArucoCalibrationError("Marker size must be positive for RGB pose estimation.")
+
+    raw_corners = np.asarray(corners_raw_px, dtype=np.float64).reshape(4, 2)
+    camera_matrix, coefficients = _scaled_rgb_camera_model(
+        geometry,
+        width=width,
+        height=height,
+    )
+
+    half = size / 2.0
+    object_points = np.asarray(
+        [
+            [-half, +half, 0.0],
+            [+half, +half, 0.0],
+            [+half, -half, 0.0],
+            [-half, -half, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    success, rvec, tvec = cv2.solvePnP(
+        object_points,
+        raw_corners.reshape(4, 1, 2),
+        camera_matrix,
+        coefficients,
+        flags=cv2.SOLVEPNP_IPPE_SQUARE,
+    )
+    if not success:
+        raise ArucoCalibrationError("OpenCV could not solve the 30 mm ArUco marker pose.")
+
+    center_xyz = np.asarray(tvec, dtype=np.float64).reshape(3)
+    if not np.all(np.isfinite(center_xyz)) or center_xyz[2] <= 0:
+        raise ArucoCalibrationError("ArUco RGB pose returned an invalid marker-center Camera XYZ.")
+
+    projected, _ = cv2.projectPoints(
+        object_points,
+        rvec,
+        tvec,
+        camera_matrix,
+        coefficients,
+    )
+    projected = np.asarray(projected, dtype=np.float64).reshape(4, 2)
+    reprojection = np.linalg.norm(projected - raw_corners, axis=1)
+    reprojection_rms = float(np.sqrt(np.mean(reprojection**2)))
+    side_lengths = [
+        float(np.linalg.norm(raw_corners[(index + 1) % 4] - raw_corners[index]))
+        for index in range(4)
+    ]
+
+    return center_xyz, {
+        "method": "rgb_aruco_pnp_ippe_square",
+        "marker_size_mm": size,
+        "reprojection_rms_px": reprojection_rms,
+        "reprojection_max_px": float(np.max(reprojection)),
+        "minimum_marker_side_px": min(side_lengths),
+        "raw_marker_corners_px": raw_corners.tolist(),
+        "rotation_vector": np.asarray(rvec, dtype=np.float64).reshape(3).tolist(),
+    }
+
+
 def _depth_request_points(corners: np.ndarray) -> list[dict[str, Any]]:
     fractions = (0.30, 0.50, 0.70)
     points: list[dict[str, Any]] = []
@@ -368,6 +489,7 @@ def _inject_geometry(metadata_filename: str, geometry: dict[str, Any]) -> None:
 def capture_marker_point(
     *,
     marker_id: int = DEFAULT_MARKER_ID,
+    marker_size_mm: float = DEFAULT_MARKER_SIZE_MM,
     geometry: dict[str, Any] | None = None,
     depth_radius_px: int = DEFAULT_DEPTH_RADIUS_PX,
     max_plane_rms_mm: float = DEFAULT_MAX_PLANE_RMS_MM,
@@ -380,23 +502,73 @@ def capture_marker_point(
         metadata_filename=capture.metadata_filename,
     )
     _inject_geometry(capture.metadata_filename, active_geometry)
-    display_path = CAPTURE_DIR / display["display_color_filename"]
-    image = cv2.imread(str(display_path), cv2.IMREAD_COLOR)
-    if image is None:
-        raise ArucoCalibrationError("Could not decode the upright Gemini RGB capture.")
-    corners = detect_marker_corners(image, marker_id)
-    camera_xyz, diagnostics = estimate_marker_center_camera_xyz(
-        capture.capture_id,
-        corners,
-        depth_radius_px=depth_radius_px,
-        max_plane_rms_mm=max_plane_rms_mm,
+    raw_path = CAPTURE_DIR / Path(capture.color_filename).name
+    raw_image = cv2.imread(str(raw_path), cv2.IMREAD_COLOR)
+    if raw_image is None:
+        raise ArucoCalibrationError("Could not decode the native Gemini RGB capture.")
+    raw_corners = detect_marker_corners(raw_image, marker_id)
+
+    metadata_path = CAPTURE_DIR / Path(capture.metadata_filename).name
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    rotation_degrees = int(metadata.get("display", {}).get("rotation_degrees", 0))
+    display_corners = np.asarray(
+        [
+            raw_to_display_pixel(
+                float(point[0]),
+                float(point[1]),
+                width=capture.width,
+                height=capture.height,
+                rotation_degrees=rotation_degrees,
+            )
+            for point in raw_corners
+        ],
+        dtype=np.float64,
     )
+
+    pnp_xyz, pnp_diagnostics = estimate_marker_center_camera_xyz_pnp(
+        raw_corners,
+        marker_size_mm=marker_size_mm,
+        geometry=active_geometry,
+        width=capture.width,
+        height=capture.height,
+    )
+
+    depth_xyz: np.ndarray | None = None
+    depth_diagnostics: dict[str, Any]
+    try:
+        depth_xyz, depth_details = estimate_marker_center_camera_xyz(
+            capture.capture_id,
+            display_corners,
+            depth_radius_px=depth_radius_px,
+            max_plane_rms_mm=max_plane_rms_mm,
+        )
+        depth_diagnostics = {
+            "available": True,
+            **depth_details,
+            "pnp_vs_depth_center_difference_mm": float(np.linalg.norm(pnp_xyz - depth_xyz)),
+        }
+    except (ArucoCalibrationError, CalibrationDepthError) as exc:
+        depth_diagnostics = {
+            "available": False,
+            "error": str(exc),
+        }
+
+    if depth_xyz is not None:
+        camera_xyz = depth_xyz
+        position_method = "aligned_depth_plane"
+    else:
+        camera_xyz = pnp_xyz
+        position_method = "rgb_aruco_pnp_fallback"
+
     return {
         "capture_id": capture.capture_id,
         "display_filename": display["display_color_filename"],
         "camera_xyz_mm": camera_xyz.tolist(),
-        "marker_corners_display_px": corners.tolist(),
-        "depth_diagnostics": diagnostics,
+        "camera_xyz_method": position_method,
+        "marker_corners_raw_px": raw_corners.tolist(),
+        "marker_corners_display_px": display_corners.tolist(),
+        "pnp_diagnostics": pnp_diagnostics,
+        "depth_diagnostics": depth_diagnostics,
     }
 
 
@@ -429,6 +601,7 @@ def run_calibration(
         try:
             measured = capture_marker_point(
                 marker_id=marker_id,
+                marker_size_mm=marker_size_mm,
                 geometry=geometry,
                 depth_radius_px=depth_radius_px,
                 max_plane_rms_mm=max_plane_rms_mm,
@@ -439,10 +612,19 @@ def run_calibration(
             measured["command_robot_xyz_mm"] = command_xyz.tolist()
             measured["marker_robot_xyz_mm"] = marker_xyz.tolist()
             records.append(measured)
+            detail = measured["camera_xyz_method"]
+            if measured["depth_diagnostics"].get("available"):
+                detail += (
+                    f"; plane RMS={measured['depth_diagnostics']['plane_rms_mm']:.2f} mm"
+                )
+            else:
+                detail += (
+                    f"; PnP reproj RMS={measured['pnp_diagnostics']['reprojection_rms_px']:.2f}px"
+                )
             print(
                 "  OK camera XYZ="
                 + ", ".join(f"{value:.2f}" for value in measured["camera_xyz_mm"])
-                + f"; plane RMS={measured['depth_diagnostics']['plane_rms_mm']:.2f} mm"
+                + f"; {detail}"
             )
         except (
             ArucoCalibrationError,
@@ -490,7 +672,7 @@ def run_calibration(
     payload = {
         "format_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "calibration_type": "aruco_depth_camera_to_robot_rigid",
+        "calibration_type": "aruco_hybrid_camera_to_robot_rigid",
         "coordinate_model": "undistorted_rgb_pinhole_camera_xyz_mm_to_robot_xyz_mm_rigid",
         "marker": {
             "dictionary": "DICT_4X4_50",
