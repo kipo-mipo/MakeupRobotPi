@@ -258,6 +258,66 @@ curl -X POST http://127.0.0.1:8000/robot/emergency-stop
 
 The point tester assumes the Robot X/Y/Z values used during calibration are the same Klipper X/Y/Z coordinates in millimeters.
 
+
+## Automatic ArUco camera-to-robot calibration
+
+For the fixed-orientation X/Z nozzle mechanism, `scripts/calibrate_aruco_robot.py` can collect camera-to-robot correspondences automatically from the mounted fiducial:
+
+- ArUco dictionary `DICT_4X4_50`
+- marker ID `0` by default
+- nominal coded marker size `30 mm`
+- default candidate grid: X `0..220 mm`, Z `0..70 mm`
+- 5 X positions × 4 Z positions = 20 candidates
+- X/Z motion only; it never commands Y, the airbrush servo, or the solenoid
+- failed/occluded marker positions are skipped
+- at least 8 valid points, spanning at least three X and three Z levels, are required
+- final fit is one proper rigid rotation + translation with training and leave-one-out residuals
+
+First verify the marker and Gemini depth at the current position without robot motion:
+
+```bash
+python scripts/calibrate_aruco_robot.py --check-marker
+```
+
+Preview the default grid:
+
+```bash
+python scripts/calibrate_aruco_robot.py
+```
+
+The physical marker center is usually offset from the nozzle tip. That offset must be accounted for; otherwise the fitted rotation can look correct while the final translation is wrong by a constant amount. The execute mode therefore requires all three components of:
+
+```text
+marker center - nozzle tip, expressed in Robot X/Y/Z millimeters
+```
+
+After measuring those values from the CAD/printed attachment, run:
+
+```bash
+python scripts/calibrate_aruco_robot.py \
+  --marker-offset-x MARKER_MINUS_NOZZLE_X_MM \
+  --marker-offset-y MARKER_MINUS_NOZZLE_Y_MM \
+  --marker-offset-z MARKER_MINUS_NOZZLE_Z_MM \
+  --execute
+```
+
+The script uses the four detected tag corners to sample a 3×3 set of interior aligned-depth points, fits the tag depth plane, intersects the tag-center camera ray with that plane, and pairs the resulting Gemini Camera XYZ with the known Robot coordinate of the marker center. The nominal 30 mm tag size is recorded for audit but is not used to scale the depth-derived camera point.
+
+Results are written to:
+
+```text
+config/aruco_robot_calibration_latest.json
+```
+
+The result contains the rigid transform, every successful correspondence, skipped candidates, training residuals, leave-one-out residuals, camera depth span, and a quality gate. A failed quality gate is still saved for diagnosis but should not be used for physical targeting.
+
+Run the geometry/motion-safety tests with:
+
+```bash
+python -m unittest discover -s tests -p 'test_aruco_robot_calibration.py'
+```
+
+
 ## 23° half-face serpentine spray test
 
 For the angled-plane mannequin experiment, `scripts/spray_serpentine_test.py` runs a lawn-mower-style X/Z pattern:
