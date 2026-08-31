@@ -317,6 +317,33 @@ Run the geometry/motion-safety tests with:
 python -m unittest discover -s tests -p 'test_aruco_robot_calibration.py'
 ```
 
+After a calibration passes, validate it independently before using the transform for physical targeting:
+
+```bash
+python scripts/validate_aruco_robot.py
+```
+
+The first run is preview-only. It shows eight off-grid positions between the original 5×4 calibration lines. After checking those coordinates, execute:
+
+```bash
+python scripts/validate_aruco_robot.py --execute
+```
+
+The validator does **not** refit the transform. At each held-out point it captures the marker, applies the saved camera→robot rotation/translation, and compares the predicted marker Robot XYZ with the known commanded Robot XYZ plus the saved marker offset. It prints a full residual vector `ΔX/ΔY/ΔZ` and total error for each point.
+
+Default independent quality limits are:
+
+```text
+RMS error <= 3.0 mm
+maximum error <= 5.0 mm
+```
+
+Results are saved to:
+
+```text
+config/aruco_robot_validation_latest.json
+```
+
 
 ## 23° half-face serpentine spray test
 
